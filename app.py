@@ -34,7 +34,6 @@ st.set_page_config(
 # ---------------------------------------------------------
 # SECURE API KEY RESOLUTION
 # ---------------------------------------------------------
-# Priority: Streamlit Cloud Secrets -> Environment Variable -> Sidebar Manual Entry
 def resolve_api_key() -> str:
     if "GEMINI_API_KEY" in st.secrets:
         return st.secrets["GEMINI_API_KEY"]
@@ -597,6 +596,25 @@ def add_page_number_fields(footer_paragraph):
     footer_paragraph._p.append(fld2)
 
 
+def add_section_divider_before(paragraph):
+    """Inserts a dedicated horizontal divider rule that renders reliably in Word and LibreOffice."""
+    divider_xml = parse_xml(
+        r'<w:p %s>'
+        r'  <w:pPr>'
+        r'    <w:pBrd>'
+        r'      <w:bottom w:val="single" w:sz="12" w:space="1" w:color="CBD5E1"/>'
+        r'    </w:pBrd>'
+        r'    <w:spacing w:before="240" w:after="160"/>'
+        r'  </w:pPr>'
+        r'  <w:r>'
+        r'    <w:rPr><w:sz w:val="4"/></w:rPr>'
+        r'    <w:t> </w:t>'
+        r'  </w:r>'
+        r'</w:p>' % nsdecls('w')
+    )
+    paragraph._p.addprevious(divider_xml)
+
+
 def style_assessment_docx(docx_path: str, logo_img_path: str = "iwish_logo.jpg"):
     doc = Document(docx_path)
     section = doc.sections[0]
@@ -623,7 +641,7 @@ def style_assessment_docx(docx_path: str, logo_img_path: str = "iwish_logo.jpg")
     footer_p = footer.paragraphs[0]
     add_page_number_fields(footer_p)
 
-    # 3. Typography, Borders & keep_with_next
+    # 3. Typography, Borders & Formatting
     section_keywords = ["MULTIPLE CHOICE QUESTIONS", "SHORT ANSWER QUESTIONS", "LONG ANSWER QUESTIONS"]
     is_first_section = True
 
@@ -672,16 +690,16 @@ def style_assessment_docx(docx_path: str, logo_img_path: str = "iwish_logo.jpg")
         if matched_section:
             p.text = matched_section
             p.alignment = WD_ALIGN_PARAGRAPH.LEFT
-            run = p.runs[0]
-            run.font.name = "Arial"
-            run.font.size = Pt(11.5)
-            run.font.bold = True
-            run.font.color.rgb = RGBColor(30, 41, 59)
+            for run in p.runs:
+                run.font.name = "Arial"
+                run.font.size = Pt(13.5)  # 2 pt larger than 11.5 pt
+                run.font.bold = True
+                run.font.underline = True  # Underlined section title
+                run.font.color.rgb = RGBColor(30, 41, 59)
 
             if not is_first_section:
-                pBrd = parse_xml(r'<w:pBrd %s><w:top w:val="single" w:sz="6" w:space="8" w:color="CBD5E1"/></w:pBrd>' % nsdecls('w'))
-                p._p.get_or_add_pPr().append(pBrd)
-                p.paragraph_format.space_before = Pt(20)
+                add_section_divider_before(p)
+                p.paragraph_format.space_before = Pt(6)
             else:
                 p.paragraph_format.space_before = Pt(8)
                 is_first_section = False
@@ -785,8 +803,11 @@ def convert_docx_to_pdf(docx_path: str, output_pdf_path: str) -> bool:
 
 
 # ---------------------------------------------------------
-# STREAMLIT USER INTERFACE
+# STREAMLIT USER INTERFACE & SESSION STATE MANAGEMENT
 # ---------------------------------------------------------
+if "assessment_data" not in st.session_state:
+    st.session_state["assessment_data"] = None
+
 st.title("✨ iWish Exam Paper Generator ✨")
 st.markdown("Upload chapter notes or a textbook PDF to automatically generate a styled homework assessment.")
 
@@ -810,15 +831,26 @@ if req_mcq + req_saq + req_laq == 0:
 
 uploaded_pdf = st.file_uploader("Upload Chapter PDF Document", type=["pdf"])
 
-if uploaded_pdf and st.button("🪄 Generate Assessment Paper", type="primary"):
+col_action1, col_action2 = st.columns([3, 1])
+with col_action1:
+    generate_clicked = st.button("🪄 Generate Assessment Paper", type="primary", use_container_width=True)
+with col_action2:
+    if st.session_state["assessment_data"] is not None:
+        if st.button("🔄 Clear / New Exam", use_container_width=True):
+            st.session_state["assessment_data"] = None
+            st.rerun()
+
+if generate_clicked:
     if not api_key:
         st.error("Please enter a valid Gemini API Key in the sidebar or deploy secrets.")
         st.stop()
     if req_mcq + req_saq + req_laq == 0:
         st.error("Please select at least one question type.")
         st.stop()
+    if not uploaded_pdf:
+        st.error("Please upload a PDF document before generating.")
+        st.stop()
 
-    # Create temporary working directory for this run
     with tempfile.TemporaryDirectory() as temp_dir:
         temp_input_pdf = os.path.join(temp_dir, uploaded_pdf.name)
         with open(temp_input_pdf, "wb") as f:
@@ -828,7 +860,6 @@ if uploaded_pdf and st.button("🪄 Generate Assessment Paper", type="primary"):
         docx_output_path = os.path.join(temp_dir, f"{base_stem}_Assessment.docx")
         pdf_output_path = os.path.join(temp_dir, f"{base_stem}_Assessment.pdf")
 
-        # UI Progress elements
         progress_bar = st.progress(0)
         status_box = st.empty()
 
@@ -836,7 +867,7 @@ if uploaded_pdf and st.button("🪄 Generate Assessment Paper", type="primary"):
             # Tier 1 (0% -> 20%)
             progress_bar.progress(10)
             status_box.info(random.choice(TIER_1_MESSAGES))
-            time.sleep(1.2)
+            time.sleep(1.0)
 
             # Tier 2 (20% -> 40%)
             progress_bar.progress(25)
@@ -850,24 +881,20 @@ if uploaded_pdf and st.button("🪄 Generate Assessment Paper", type="primary"):
             status_box.info(random.choice(TIER_3_MESSAGES))
             time.sleep(1.0)
 
-            # Convert to Markdown
             markdown_content = json_to_markdown(assessment_json, selected_date)
 
             # Tier 4 (60% -> 80%)
             progress_bar.progress(68)
             status_box.info(random.choice(TIER_4_MESSAGES))
 
-            # Compile Base DOCX via Pandoc
             build_base_docx(markdown_content, docx_output_path)
 
             # Tier 5 (80% -> 95%)
             progress_bar.progress(85)
             status_box.info(random.choice(TIER_5_MESSAGES))
 
-            # Style DOCX
             style_assessment_docx(docx_output_path, logo_img_path="iwish_logo.jpg")
 
-            # Convert to PDF
             pdf_success = convert_docx_to_pdf(docx_output_path, pdf_output_path)
 
             # Tier 6 (100%)
@@ -875,9 +902,6 @@ if uploaded_pdf and st.button("🪄 Generate Assessment Paper", type="primary"):
             status_box.success(random.choice(TIER_6_MESSAGES))
             time.sleep(0.8)
 
-            st.success("🎉 Assessment generation complete!")
-
-            # Read generated files for download
             with open(docx_output_path, "rb") as f_docx:
                 docx_bytes = f_docx.read()
 
@@ -886,35 +910,53 @@ if uploaded_pdf and st.button("🪄 Generate Assessment Paper", type="primary"):
                 with open(pdf_output_path, "rb") as f_pdf:
                     pdf_bytes = f_pdf.read()
 
-            # Dual Delivery Download Buttons
-            col1, col2 = st.columns(2)
-            with col1:
-                st.download_button(
-                    label="📥 Download Word Assessment (.docx)",
-                    data=docx_bytes,
-                    file_name=f"{base_stem}_Assessment.docx",
-                    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                    use_container_width=True
-                )
-            with col2:
-                if pdf_bytes:
-                    st.download_button(
-                        label="📥 Download Vector PDF (.pdf)",
-                        data=pdf_bytes,
-                        file_name=f"{base_stem}_Assessment.pdf",
-                        mime="application/pdf",
-                        use_container_width=True
-                    )
-                else:
-                    st.info("PDF engine conversion unavailable on this local instance. Open and save via Word.")
-
-            # In-Browser PDF Preview
-            if pdf_bytes:
-                st.subheader("📄 Assessment Preview")
-                base64_pdf = base64.b64encode(pdf_bytes).decode('utf-8')
-                pdf_display = f'<iframe src="data:application/pdf;base64,{base64_pdf}" width="100%" height="850" type="application/pdf"></iframe>'
-                st.markdown(pdf_display, unsafe_allow_html=True)
+            # Store generated files in Session State
+            st.session_state["assessment_data"] = {
+                "docx_bytes": docx_bytes,
+                "pdf_bytes": pdf_bytes,
+                "base_stem": base_stem
+            }
+            status_box.empty()
+            progress_bar.empty()
+            st.rerun()
 
         except Exception as e:
             status_box.empty()
+            progress_bar.empty()
             st.error(f"Generation error: {e}")
+
+# ---------------------------------------------------------
+# PERSISTENT DOWNLOADS & PDF PREVIEW
+# ---------------------------------------------------------
+if st.session_state["assessment_data"] is not None:
+    data = st.session_state["assessment_data"]
+
+    st.success("🎉 Assessment generation complete! You can download both files below.")
+
+    col1, col2 = st.columns(2)
+    with col1:
+        st.download_button(
+            label="📥 Download Word Assessment (.docx)",
+            data=data["docx_bytes"],
+            file_name=f"{data['base_stem']}_Assessment.docx",
+            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            use_container_width=True
+        )
+    with col2:
+        if data["pdf_bytes"]:
+            st.download_button(
+                label="📥 Download Vector PDF (.pdf)",
+                data=data["pdf_bytes"],
+                file_name=f"{data['base_stem']}_Assessment.pdf",
+                mime="application/pdf",
+                use_container_width=True
+            )
+        else:
+            st.info("PDF engine conversion unavailable. Download DOCX to print/save as PDF.")
+
+    if data["pdf_bytes"]:
+        st.markdown("---")
+        st.subheader("📄 In-Browser Assessment Preview")
+        base64_pdf = base64.b64encode(data["pdf_bytes"]).decode('utf-8')
+        pdf_display = f'<iframe src="data:application/pdf;base64,{base64_pdf}" width="100%" height="850" type="application/pdf"></iframe>'
+        st.markdown(pdf_display, unsafe_allow_html=True)
