@@ -375,7 +375,7 @@ TIER_6_MESSAGES = [
 ]
 
 # ---------------------------------------------------------
-# CORE BACKEND FUNCTIONS
+# CORE BACKEND FUNCTIONS & BULLETPROOF MATH GUARDS
 # ---------------------------------------------------------
 def sanitize_raw_json_string(raw_json_str: str) -> str:
     cleaned = raw_json_str.strip()
@@ -397,6 +397,26 @@ def sanitize_raw_json_string(raw_json_str: str) -> str:
     return re.sub(latex_cmd_regex, r'\\\\', cleaned)
 
 
+def check_text_for_math_errors(text: str) -> tuple[bool, str]:
+    """Validates math delimiter parity and flags runaway math blocks swallowing English words."""
+    if not text:
+        return True, "Valid"
+
+    # 1. Unbalanced dollar signs check
+    dollar_count = len(re.findall(r'(?<!\\)\$', text))
+    if dollar_count % 2 != 0:
+        return False, f"Unbalanced '$' delimiter detected (found {dollar_count} '$' signs). Every '$' must be closed."
+
+    # 2. Runaway math block check
+    math_blocks = re.findall(r'(?<!\\)\$([^\$]+)\$', text)
+    stopwords = r'\b(is|are|was|were|in|into|absorbed|with|from|than|to|of|the|and|reacting|directly|gas|rather|take|place|vessel|which|calculate|determine|explain)\b'
+    for block in math_blocks:
+        if len(re.findall(stopwords, block, re.IGNORECASE)) >= 2:
+            return False, f"Runaway math block detected containing English text: '${block[:35]}...$'"
+
+    return True, "Valid"
+
+
 def verify_assessment_json(data: dict, req_mcq: int, req_saq: int, req_laq: int) -> tuple[bool, str]:
     if not isinstance(data, dict):
         return False, "Response root must be a valid JSON object."
@@ -413,27 +433,83 @@ def verify_assessment_json(data: dict, req_mcq: int, req_saq: int, req_laq: int)
         return False, f"Expected exactly {req_laq} Long Answer questions, got {len(laqs)}."
 
     for i, q in enumerate(mcqs, 1):
-        if not str(q.get("stem", "")).strip():
+        stem = str(q.get("stem", "")).strip()
+        if not stem:
             return False, f"MCQ #{i} has an empty stem."
+        ok, err = check_text_for_math_errors(stem)
+        if not ok:
+            return False, f"MCQ #{i} stem math error: {err}"
+
         opts = q.get("options", {})
         if not isinstance(opts, dict):
             return False, f"MCQ #{i} options must be a dictionary."
         for opt_key in ["A", "B", "C", "D"]:
             if opt_key not in opts or not str(opts[opt_key]).strip():
                 return False, f"MCQ #{i} is missing option '{opt_key}'."
+            ok, err = check_text_for_math_errors(str(opts[opt_key]))
+            if not ok:
+                return False, f"MCQ #{i} option {opt_key} math error: {err}"
 
     for i, q in enumerate(saqs, 1):
-        if not str(q.get("stem", "")).strip():
+        stem = str(q.get("stem", "")).strip()
+        if not stem:
             return False, f"Short Answer #{i} has an empty stem."
+        ok, err = check_text_for_math_errors(stem)
+        if not ok:
+            return False, f"Short Answer #{i} stem math error: {err}"
+        for s_idx, sub in enumerate(q.get("sub_parts", []), 1):
+            ok, err = check_text_for_math_errors(str(sub))
+            if not ok:
+                return False, f"Short Answer #{i} sub-part #{s_idx} math error: {err}"
 
     for i, q in enumerate(laqs, 1):
-        if not str(q.get("stem", "")).strip():
+        stem = str(q.get("stem", "")).strip()
+        if not stem:
             return False, f"Long Answer #{i} has an empty stem."
+        ok, err = check_text_for_math_errors(stem)
+        if not ok:
+            return False, f"Long Answer #{i} stem math error: {err}"
         sub_parts = q.get("sub_parts", [])
         if not sub_parts or not isinstance(sub_parts, list):
             return False, f"Long Answer #{i} must include sub_parts."
+        for l_idx, sub in enumerate(sub_parts, 1):
+            ok, err = check_text_for_math_errors(str(sub))
+            if not ok:
+                return False, f"Long Answer #{i} sub-part #{l_idx} math error: {err}"
 
     return True, "Valid"
+
+
+def repair_math_syntax(text: str) -> str:
+    """Pre-processing auto-healer that guarantees clean LaTeX delimiter syntax prior to Pandoc compilation."""
+    if not text:
+        return ""
+
+    # 1. Fix malformed parenthesis + math traps: e.g. "($ SO_3)" or "($SO_3) " -> "($SO_3$) "
+    text = re.sub(r'\(\$([A-Za-z0-9_\\\^\{\}\s]+?)\)', r'($\1$)', text)
+    text = re.sub(r'\(\$([A-Za-z0-9_\\\^\{\}]+?)\s', r'($\1$) ', text)
+
+    # 2. Break up runaway math blocks that accidentally swallowed regular English sentences
+    def break_runaway_math(match):
+        content = match.group(1)
+        stopwords = r'\b(is|are|was|were|in|into|absorbed|with|from|than|to|of|the|and|reacting|directly|gas|rather|take|place|vessel|which|calculate|determine|explain)\b'
+        words_found = len(re.findall(stopwords, content, re.IGNORECASE))
+        if words_found >= 2 or (content.count(' ') >= 4 and re.search(r'[a-zA-Z]{4,}', content)):
+            # If plain text was trapped inside math delimiters, return plain text
+            return content
+        return f"${content}$"
+
+    text = re.sub(r'(?<!\\)\$([^\$]+)\$', break_runaway_math, text)
+
+    # 3. Clean unbalanced dollar signs (close solitary trailing delimiter if odd)
+    dollar_count = len(re.findall(r'(?<!\\)\$', text))
+    if dollar_count % 2 != 0:
+        text = text + "$"
+
+    # 4. Remove whitespace directly adjacent to inner dollar signs ($ x $ -> $x$)
+    text = re.sub(r'\$\s+([^\$]+?)\s+\$', r'$\1$', text)
+
+    return text
 
 
 def generate_and_verify_homework(pdf_path: str, api_key: str, req_mcq: int, req_saq: int, req_laq: int) -> dict:
@@ -447,10 +523,15 @@ CRITICAL TYPOGRAPHY & LATEX RULES:
    * Examples: `$H_2SO_4$`, `$\\text{{Fe}}^{{3+}}$`, `$\\Delta G^\\circ = -131\\text{{ kJ mol}}^{{-1}}$`, `$450^\\circ\\text{{C}}$`, `$K_c$`.
 2. Wrap all standalone chemical equations, multi-step reactions, and mathematical proofs in double dollar signs:
    $$\\text{{CaCO}}_3(s) + 2\\text{{HCl}}(aq) \\rightarrow \\text{{CaCl}}_2(aq) + \\text{{H}}_2\\text{{O}}(l) + \\text{{CO}}_2(g)$$
-3. Always use standard LaTeX arrows: `\\rightarrow`, `\\rightleftharpoons`, `\\Rightarrow`.
-4. Strictly zero meta-language: never write "based on the reading", "according to the notes", or "from the text".
-5. Do NOT include point values, marks, rubrics, answer keys, or horizontal divider lines.
-6. CRITICAL JSON ESCAPING: In JSON string values, double-escape all LaTeX commands (e.g. `\\\\text{{MJ}}`, `\\\\frac{{25}}{{2}}`, `\\\\Delta`, `\\\\rightarrow`).
+3. Strict delimiter rules for formulas:
+   * Keep '$' tightly wrapped around chemical symbols and formulas ONLY.
+   * Put parentheses OUTSIDE the '$' delimiters: write '($SO_3$)', NEVER '($SO_3)' or '$ (SO_3) $'.
+   * NEVER include English words, prepositions, or surrounding prose inside '$' signs (e.g. NEVER write '$SO_3 gas is absorbed$').
+   * EVERY opening '$' MUST have an immediate matching closing '$' on the exact same formula.
+4. Always use standard LaTeX arrows: `\\rightarrow`, `\\rightleftharpoons`, `\\Rightarrow`.
+5. Strictly zero meta-language: never write "based on the reading", "according to the notes", or "from the text".
+6. Do NOT include point values, marks, rubrics, answer keys, or horizontal divider lines.
+7. CRITICAL JSON ESCAPING: In JSON string values, double-escape all LaTeX commands (e.g. `\\\\text{{MJ}}`, `\\\\frac{{25}}{{2}}`, `\\\\Delta`, `\\\\rightarrow`).
 
 OUTPUT STRICT VALID JSON conforming to:
 {{
@@ -510,7 +591,7 @@ EXACT QUANTITY REQUIRED:
                         return parsed_json
 
                     conversation_contents.append(response.text)
-                    conversation_contents.append(f"VALIDATION ERROR: {validation_msg}\nRegenerate with exact counts.")
+                    conversation_contents.append(f"VALIDATION ERROR: {validation_msg}\nEnsure every '$' is closed and parentheses are outside '$'. Regenerate.")
                 except Exception as err:
                     last_exception = err
                     break
@@ -533,11 +614,11 @@ def json_to_markdown(data: dict, selected_date: str) -> str:
         md_lines.append("## MULTIPLE CHOICE QUESTIONS\n")
         for q in mcqs:
             num = q.get("number", 1)
-            stem = str(q.get("stem", "")).strip()
+            stem = repair_math_syntax(str(q.get("stem", "")).strip())
             md_lines.append(f"**{num}.** {stem}\n")
             opts = q.get("options", {})
             for opt_key in ["A", "B", "C", "D"]:
-                opt_val = str(opts.get(opt_key, "")).strip()
+                opt_val = repair_math_syntax(str(opts.get(opt_key, "")).strip())
                 md_lines.append(f"**{opt_key})** {opt_val}\n")
             md_lines.append("")
 
@@ -545,10 +626,10 @@ def json_to_markdown(data: dict, selected_date: str) -> str:
         md_lines.append("## SHORT ANSWER QUESTIONS\n")
         for q in saqs:
             num = q.get("number", 1)
-            stem = str(q.get("stem", "")).strip()
+            stem = repair_math_syntax(str(q.get("stem", "")).strip())
             md_lines.append(f"**{num}.** {stem}\n")
             for sub in q.get("sub_parts", []):
-                sub_str = str(sub).strip()
+                sub_str = repair_math_syntax(str(sub).strip())
                 sub_formatted = re.sub(r'^([a-d]\)|[ivx]+\))\s*', r'**\1** ', sub_str, flags=re.IGNORECASE)
                 if not sub_formatted.startswith("**"):
                     sub_formatted = f"**-** {sub_formatted}"
@@ -559,10 +640,10 @@ def json_to_markdown(data: dict, selected_date: str) -> str:
         md_lines.append("## LONG ANSWER QUESTIONS\n")
         for q in laqs:
             num = q.get("number", 1)
-            stem = str(q.get("stem", "")).strip()
+            stem = repair_math_syntax(str(q.get("stem", "")).strip())
             md_lines.append(f"**{num}.** {stem}\n")
             for sub in q.get("sub_parts", []):
-                sub_str = str(sub).strip()
+                sub_str = repair_math_syntax(str(sub).strip())
                 sub_formatted = re.sub(r'^([a-d]\)|[ivx]+\))\s*', r'**\1** ', sub_str, flags=re.IGNORECASE)
                 if not sub_formatted.startswith("**"):
                     sub_formatted = f"**-** {sub_formatted}"
@@ -692,9 +773,9 @@ def style_assessment_docx(docx_path: str, logo_img_path: str = "iwish_logo.jpg")
             p.alignment = WD_ALIGN_PARAGRAPH.LEFT
             for run in p.runs:
                 run.font.name = "Arial"
-                run.font.size = Pt(13.5)  # 2 pt larger than 11.5 pt
+                run.font.size = Pt(13.5)
                 run.font.bold = True
-                run.font.underline = True  # Underlined section title
+                run.font.underline = True
                 run.font.color.rgb = RGBColor(30, 41, 59)
 
             if not is_first_section:
@@ -873,7 +954,7 @@ if generate_clicked:
             progress_bar.progress(25)
             status_box.info(random.choice(TIER_2_MESSAGES))
 
-            # Backend AI Generation
+            # Backend AI Generation with Parity and Runaway Math Validation
             assessment_json = generate_and_verify_homework(temp_input_pdf, api_key, req_mcq, req_saq, req_laq)
 
             # Tier 3 (40% -> 60%)
