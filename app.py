@@ -42,15 +42,19 @@ def resolve_api_key() -> str:
     return ""
 
 # ---------------------------------------------------------
-# MODEL HIERARCHY
+# TOP 10 PRODUCTION MODEL FALLBACK HIERARCHY
 # ---------------------------------------------------------
-MODELS_TO_TRY = [
-    "gemini-3.7-flash",  # Primary
-    "gemini-3.6-flash",  # Fallback 1
-    "gemini-3.5-flash",  # Fallback 2
-    "gemini-3.1-flash",  # Fallback 3
-    "gemini-3.1-pro",    # Fallback 4
-    "gemini-2.5-flash",  # Fallback 5
+STATIC_MODELS_TO_TRY = [
+    "gemini-3.8-flash",          # Rank 1: Primary (Flagship agentic reasoning & multimodal speed)
+    "gemini-3.7-flash",          # Rank 2: Fallback 1 (High intelligence-to-speed ratio)
+    "gemini-3.6-flash",          # Rank 3: Fallback 2 (Google recommended stable production tier)
+    "gemini-3.1-pro-preview",    # Rank 4: Fallback 3 (Deep reasoning for complex calculations)
+    "gemini-3.5-flash",          # Rank 5: Fallback 4 (Proven multimodal workhorse)
+    "gemini-2.5-pro",            # Rank 6: Fallback 5 (Advanced structural reasoning)
+    "gemini-flash-latest",       # Rank 7: Fallback 6 (Dynamic active Flash alias)
+    "gemini-pro-latest",         # Rank 8: Fallback 7 (Dynamic active Pro alias)
+    "gemini-3.5-flash-lite",     # Rank 9: Fallback 8 (Low-latency high-throughput tier)
+    "gemini-3.1-flash-lite",     # Rank 10: Fallback 9 (Emergency speed fallback)
 ]
 
 # ---------------------------------------------------------
@@ -398,16 +402,13 @@ def sanitize_raw_json_string(raw_json_str: str) -> str:
 
 
 def check_text_for_math_errors(text: str) -> tuple[bool, str]:
-    """Validates math delimiter parity and flags runaway math blocks swallowing English words."""
     if not text:
         return True, "Valid"
 
-    # 1. Unbalanced dollar signs check
     dollar_count = len(re.findall(r'(?<!\\)\$', text))
     if dollar_count % 2 != 0:
         return False, f"Unbalanced '$' delimiter detected (found {dollar_count} '$' signs). Every '$' must be closed."
 
-    # 2. Runaway math block check
     math_blocks = re.findall(r'(?<!\\)\$([^\$]+)\$', text)
     stopwords = r'\b(is|are|was|were|in|into|absorbed|with|from|than|to|of|the|and|reacting|directly|gas|rather|take|place|vessel|which|calculate|determine|explain)\b'
     for block in math_blocks:
@@ -481,35 +482,54 @@ def verify_assessment_json(data: dict, req_mcq: int, req_saq: int, req_laq: int)
 
 
 def repair_math_syntax(text: str) -> str:
-    """Pre-processing auto-healer that guarantees clean LaTeX delimiter syntax prior to Pandoc compilation."""
     if not text:
         return ""
 
-    # 1. Fix malformed parenthesis + math traps: e.g. "($ SO_3)" or "($SO_3) " -> "($SO_3$) "
     text = re.sub(r'\(\$([A-Za-z0-9_\\\^\{\}\s]+?)\)', r'($\1$)', text)
     text = re.sub(r'\(\$([A-Za-z0-9_\\\^\{\}]+?)\s', r'($\1$) ', text)
 
-    # 2. Break up runaway math blocks that accidentally swallowed regular English sentences
     def break_runaway_math(match):
         content = match.group(1)
         stopwords = r'\b(is|are|was|were|in|into|absorbed|with|from|than|to|of|the|and|reacting|directly|gas|rather|take|place|vessel|which|calculate|determine|explain)\b'
         words_found = len(re.findall(stopwords, content, re.IGNORECASE))
         if words_found >= 2 or (content.count(' ') >= 4 and re.search(r'[a-zA-Z]{4,}', content)):
-            # If plain text was trapped inside math delimiters, return plain text
             return content
         return f"${content}$"
 
     text = re.sub(r'(?<!\\)\$([^\$]+)\$', break_runaway_math, text)
 
-    # 3. Clean unbalanced dollar signs (close solitary trailing delimiter if odd)
     dollar_count = len(re.findall(r'(?<!\\)\$', text))
     if dollar_count % 2 != 0:
         text = text + "$"
 
-    # 4. Remove whitespace directly adjacent to inner dollar signs ($ x $ -> $x$)
     text = re.sub(r'\$\s+([^\$]+?)\s+\$', r'$\1$', text)
-
     return text
+
+
+def get_available_models(client: genai.Client) -> list[str]:
+    """Queries live Gemini API to detect active supported models, prioritizing our Top 10."""
+    candidates = []
+    try:
+        models_pager = client.models.list()
+        for m in models_pager:
+            clean_name = m.name.replace("models/", "") if hasattr(m, "name") else ""
+            if any(tag in clean_name.lower() for tag in ["flash", "pro"]) and not any(tag in clean_name.lower() for tag in ["vision", "tts", "clip", "transcribe", "image"]):
+                candidates.append(clean_name)
+    except Exception:
+        pass
+
+    combined = []
+    # Prioritize our curated Top 10 models in order
+    for m in STATIC_MODELS_TO_TRY:
+        if m not in combined:
+            combined.append(m)
+
+    # Append any additional live candidates (avoiding deprecated gemini-2.5-flash)
+    for m in candidates:
+        if m not in combined and "2.5-flash" not in m:
+            combined.append(m)
+
+    return combined
 
 
 def generate_and_verify_homework(pdf_path: str, api_key: str, req_mcq: int, req_saq: int, req_laq: int) -> dict:
@@ -564,8 +584,10 @@ EXACT QUANTITY REQUIRED:
 - long_answer_questions: EXACTLY {req_laq} questions. (If 0, return [])."""
 
     try:
-        last_exception = None
-        for model_name in MODELS_TO_TRY:
+        model_errors = {}
+        active_models = get_available_models(client)
+
+        for model_name in active_models:
             conversation_contents = [
                 uploaded_file,
                 f"Generate the assessment paper as valid JSON with exactly {req_mcq} MCQs, {req_saq} Short Answer, and {req_laq} Long Answer questions."
@@ -593,10 +615,11 @@ EXACT QUANTITY REQUIRED:
                     conversation_contents.append(response.text)
                     conversation_contents.append(f"VALIDATION ERROR: {validation_msg}\nEnsure every '$' is closed and parentheses are outside '$'. Regenerate.")
                 except Exception as err:
-                    last_exception = err
+                    model_errors[model_name] = str(err)
                     break
 
-        raise RuntimeError(f"All model fallbacks failed. Last error: {last_exception}")
+        error_details = "\n".join([f"• {m}: {err}" for m, err in model_errors.items()])
+        raise RuntimeError(f"All model fallbacks failed:\n{error_details}")
     finally:
         try:
             client.files.delete(name=uploaded_file.name)
@@ -678,7 +701,6 @@ def add_page_number_fields(footer_paragraph):
 
 
 def add_section_divider_before(paragraph):
-    """Inserts a dedicated horizontal divider rule that renders reliably in Word and LibreOffice."""
     divider_xml = parse_xml(
         r'<w:p %s>'
         r'  <w:pPr>'
@@ -868,7 +890,6 @@ def style_assessment_docx(docx_path: str, logo_img_path: str = "iwish_logo.jpg")
 
 
 def convert_docx_to_pdf(docx_path: str, output_pdf_path: str) -> bool:
-    """Converts DOCX to PDF using LibreOffice in headless mode (Linux/Cloud compatible)."""
     out_dir = os.path.dirname(output_pdf_path)
     try:
         cmd = ["libreoffice", "--headless", "--convert-to", "pdf", docx_path, "--outdir", out_dir]
@@ -991,7 +1012,6 @@ if generate_clicked:
                 with open(pdf_output_path, "rb") as f_pdf:
                     pdf_bytes = f_pdf.read()
 
-            # Store generated files in Session State
             st.session_state["assessment_data"] = {
                 "docx_bytes": docx_bytes,
                 "pdf_bytes": pdf_bytes,
