@@ -1,6 +1,5 @@
 import os
 import sys
-import time
 import json
 import re
 import random
@@ -64,52 +63,41 @@ TIER_1_MESSAGES = [
     "Mendeleev aur Newton ki aatma ko summon kiya jaa raha hai... 🧙‍♂️✨",
     "Chai ka cup utha lijiye, homework ka asli jaadu ab shuru ho raha hai... ☕🪄",
     "PDF ko AI ke hawaale kar diya hai, ab bas aage ka tamasha dekhiye... 🍿🚀",
-    "Teacher mode: ON! Bachhon ki azaadi bas kuch der ki mehmaan hai... 😈⏰",
-    "Shanti se baithiye, homework ka brahmastra tayyar ho raha hai... 🏹⚡"
+    "Teacher mode: ON! Bachhon ki azaadi bas kuch der ki mehmaan hai... 😈⏰"
 ]
 
 TIER_2_MESSAGES = [
     "Aapki PDF aise padhi jaa rahi hai jaise exam ki raat 3 baje padhai hoti hai... 📖⚡",
     "AI poori PDF ko ghol ke pee raha hai, ek-ek concept dhoondh raha hai... 🧪🔍",
-    "Topper ki tarah line-by-line scanning chalu hai taaki kuch na chhoote... 🧐📄",
-    "PDF se sabse khatarnak aur tedious topics dhoondh ke nikaale jaa rahe hain... ⚠️🔬",
-    "Scanner mode ON: Har diagram, chart aur footnote ko scan kiya jaa raha hai... 📊👀"
+    "Topper ki tarah line-by-line scanning chalu hai taaki kuch na chhoote... 🧐📄"
 ]
 
 TIER_3_MESSAGES = [
     "Aise homework questions dhoondh rahe hain jise dekh ke bachhe Google karna bhool jayein... 🤯📚",
     "ChatGPT bhi do baar soche aur 'I cannot answer' keh de, aise sawaal ban rahe hain... 🤖💥",
-    "Backbenchers aur toppers dono ke dimaag ki batti gul karne ki taiyaari... 💡😵",
-    "Numerical aise set ho rahe hain jisme calculator bhi haath khade kar de... 🧮🔥",
-    "Copy-paste walo ke liye special surprise traps design ho rahe hain... 🪤❌"
+    "Numerical aise set ho rahe hain jisme calculator bhi haath khade kar de... 🧮🔥"
 ]
 
 TIER_4_MESSAGES = [
     "Option B aur C mein thoda sa dimaag ka dahi karne wala twist daal rahe hain... 😈🎯",
     "Saare options ek jaise dikhein, aisi subtle ninja technique lagayi jaa rahi hai... 🥷✨",
-    "'All of the above' daalein ya 'None of these'? Confuse karne ka formula set ho raha hai... 🎭🎲",
-    "Option elimination method ki dhajjiyan udane wala kaam chal raha hai... 🧠🌪️",
-    "Aisa option banaya hai jo pehli nazar mein 100% sahi lagega par hoga wrong... 🪤💔"
+    "Option elimination method ki dhajjiyan udane wala kaam chal raha hai... 🧠🌪️"
 ]
 
 TIER_5_MESSAGES = [
     "Homework ko ekdum masoom look de rahe hain taaki pehle lage ki kitna aasan hai... 😇📝",
     "Page layout, clean fonts aur iWish logo ekdum aesthetic set ho rahe hain... 🎨📄",
-    "Document formatting chal rahi hai, lagna chahiye board exam ka secret paper hai... 🤫📜",
-    "Equations aur chemical formulas ko sundar sa LaTeX makeup lagaya jaa raha hai... 💄⚗️",
-    "Arial font 11 pt set, spacing clean, taaki padhne mein maza aaye... 🔤👌"
+    "Equations aur chemical formulas ko sundar sa LaTeX makeup lagaya jaa raha hai... 💄⚗️"
 ]
 
 TIER_6_MESSAGES = [
     "Boom! Jaadu complete. Ab mast evil smile ke saath homework bhej do! 🪄🎉",
     "Paper ready hai! Ab WhatsApp group pe bhej ke phone silent kar lijiye... 📱🔥",
-    "Mission accomplished! Bachhon ke agle weekend ka poora bandobast ho gaya... 🏖️❌",
-    "Tadaaa! Masterpiece ban gaya, ab print nikaalo aur distribution shuru karo! 🎓🚀",
-    "Homework tayyar hai, ab class mein 'Pin drop silence' dekhne ke liye ready ho jaiye... 🤫📌"
+    "Tadaaa! Masterpiece ban gaya, ab print nikaalo aur distribution shuru karo! 🎓🚀"
 ]
 
 # ---------------------------------------------------------
-# CORE BACKEND FUNCTIONS & NUCLEAR PRE-PROCESSOR
+# CORE BACKEND FUNCTIONS & LIGHTNING-FAST PRE-PROCESSOR
 # ---------------------------------------------------------
 def sanitize_raw_json_string(raw_json_str: str) -> str:
     cleaned = raw_json_str.strip()
@@ -132,7 +120,6 @@ def sanitize_raw_json_string(raw_json_str: str) -> str:
 
 
 def verify_assessment_json(data: dict, req_mcq: int, req_saq: int, req_laq: int) -> tuple[bool, str]:
-    """Strictly validates JSON structure. Relies on repair_math_syntax to fix LaTeX rendering issues natively."""
     if not isinstance(data, dict):
         return False, "Response root must be a valid JSON object."
 
@@ -140,12 +127,9 @@ def verify_assessment_json(data: dict, req_mcq: int, req_saq: int, req_laq: int)
     saqs = data.get("short_answer_questions", [])
     laqs = data.get("long_answer_questions", [])
 
-    if len(mcqs) != req_mcq:
-        return False, f"Expected exactly {req_mcq} MCQs, got {len(mcqs)}."
-    if len(saqs) != req_saq:
-        return False, f"Expected exactly {req_saq} Short Answer questions, got {len(saqs)}."
-    if len(laqs) != req_laq:
-        return False, f"Expected exactly {req_laq} Long Answer questions, got {len(laqs)}."
+    if len(mcqs) != req_mcq: return False, f"Expected exactly {req_mcq} MCQs."
+    if len(saqs) != req_saq: return False, f"Expected exactly {req_saq} Short Answer questions."
+    if len(laqs) != req_laq: return False, f"Expected exactly {req_laq} Long Answer questions."
 
     for i, q in enumerate(mcqs, 1):
         if not str(q.get("stem", "")).strip(): return False, f"MCQ #{i} has an empty stem."
@@ -168,9 +152,8 @@ def verify_assessment_json(data: dict, req_mcq: int, req_saq: int, req_laq: int)
 
 
 def repair_math_syntax(text: str) -> str:
-    """Nuclear Pre-processor: Aggressively repairs all known LLM LaTeX hallucinations before compiling."""
-    if not text:
-        return ""
+    """Nuclear Pre-processor: Extremely fast regex logic to repair LaTeX before Pandoc compiles."""
+    if not text: return ""
 
     # 1. Normalize unicode and un-escape parentheses
     text = text.replace('\u00a0', ' ').replace('\u202f', ' ').replace('\u200b', '').replace('\ufeff', '')
@@ -189,16 +172,16 @@ def repair_math_syntax(text: str) -> str:
     text = re.sub(r'\b([A-Za-z]+)\s*\$\^', r'$\1^', text)
     text = re.sub(r'\b([A-Za-z]+)\s*\^\{?(-?\d+)\}?', r'$\1^{\2}$', text)
 
-    # Ensure Math parity so string splitting works predictably
-    if text.count('$') % 2 != 0:
-        text += '$'
+    if text.count('$') % 2 != 0: text += '$'
 
-    # 4. Force wrapping of full reaction equations
+    # 4. FAST Force-wrapping of full reaction equations (Line-by-line, zero backtracking)
     lines = text.split('\n')
     for i, line in enumerate(lines):
         if any(arr in line for arr in [r'\rightarrow', r'\rightleftharpoons', r'\to', '→', '⇌']):
-            if not line.strip().startswith('$') and not line.strip().endswith('$'):
-                lines[i] = f"$${line.strip()}$$"
+            stripped = line.strip()
+            if not stripped.startswith('$') and not stripped.endswith('$'):
+                clean_line = line.replace('$', '') # Avoid nested dollars
+                lines[i] = f"$${clean_line.strip()}$$"
     text = '\n'.join(lines)
 
     # 5. Process Outside vs Inside Math Mode
@@ -207,19 +190,16 @@ def repair_math_syntax(text: str) -> str:
 
     for i in range(len(parts)):
         if i % 2 == 0:
-            # OUTSIDE MATH MODE: Wrap orphaned macros/formulas so they aren't deleted
+            # OUTSIDE MATH MODE: Fast replacement for orphaned macros
             chunk = parts[i]
-            # Wrap \text{...}_... into math mode
             chunk = re.sub(r'(\\[a-zA-Z]+(?:\{[^\}]*\})?_?\{?[A-Za-z0-9+-]*\}?(?:\([aqslg]+\))?)', r'$\1$', chunk)
-            # Wrap chemical formulas containing underscores
-            chunk = re.sub(r'([A-Z]?[a-z]?\(\)\[\]]*_\{?[A-Za-z0-9+-]+\}?(?:\([aqslg]+\))?)', r'$\1$', chunk)
+            chunk = re.sub(r'\b([A-Z][a-z]?_\{?[0-9]+\}?[A-Za-z0-9_]*)\b', r'$\1$', chunk)
             parts[i] = chunk
         else:
-            # INSIDE MATH MODE: Prevent fused words by actively injecting \text{ } around English vocabulary
+            # INSIDE MATH MODE: Un-fuse words by actively injecting \text{ } around English vocabulary
             chunk = parts[i]
-            stopwords = r'\b(mol|mL|g|L|kg|kPa|atm|of|and|is|with|mixed|excess|solution|precipitate|mass|yield|sample|solid|formed|produced|reacts|the|in|to|from|contains|gas|at|conditions|determine|calculate|which|reactant)\b'
+            stopwords = r'\b(mol|mL|g|L|kg|kPa|atm|of|and|is|with|mixed|excess|solution|precipitate|mass|yield|sample|solid|formed|produced|reacts|the|in|to|from|contains|gas|at|conditions|determine|calculate|which|reactant|volume)\b'
             chunk = re.sub(stopwords, r'\\text{ \1 }', chunk, flags=re.IGNORECASE)
-            # Clean up redundant nested texts
             chunk = re.sub(r'\\text\{\s*\\text\{\s*([^}]+)\s*\}\s*\}', r'\\text{ \1 }', chunk)
             parts[i] = chunk
 
@@ -230,15 +210,16 @@ def repair_math_syntax(text: str) -> str:
     text = re.sub(r'\$\s*\$', '', text)
     text = re.sub(r' +', ' ', text)
 
-    if text.count('$') % 2 != 0:
-        text += '$'
-
+    if text.count('$') % 2 != 0: text += '$'
     return text.strip()
 
 
-def get_available_models(client: genai.Client) -> list[str]:
+# CACHED API POLLING: Only runs once per hour, stopping the pre-generation delay
+@st.cache_data(ttl=3600, show_spinner=False)
+def get_available_models(api_key: str) -> list[str]:
     candidates = []
     try:
+        client = genai.Client(api_key=api_key)
         models_pager = client.models.list()
         for m in models_pager:
             clean_name = m.name.replace("models/", "") if hasattr(m, "name") else ""
@@ -249,12 +230,9 @@ def get_available_models(client: genai.Client) -> list[str]:
 
     combined = []
     for m in STATIC_MODELS_TO_TRY:
-        if m not in combined:
-            combined.append(m)
-
+        if m not in combined: combined.append(m)
     for m in candidates:
-        if m not in combined and "2.5-flash" not in m:
-            combined.append(m)
+        if m not in combined and "2.5-flash" not in m: combined.append(m)
 
     return combined
 
@@ -301,7 +279,7 @@ Your objective is to craft an authentic, curriculum-aligned Australian Examinati
 - NO MARKS: Never write "[2 marks]", "(3 marks)".
 - NO LINES: Do not generate response lines or writing spaces.
 - NO META-LANGUAGE: Never write "refer to the text".
-- WRAP ALL CHEMICAL REACTIONS IN DOUBLE DOLLAR SIGNS: `$$ \text{{AgNO}}_3(aq) + \text{{NaCl}}(aq) \\rightarrow ... $$`
+- WRAP ALL CHEMICAL REACTIONS IN DOUBLE DOLLAR SIGNS: `$$ \\text{{AgNO}}_3(aq) + \\text{{NaCl}}(aq) \\rightarrow ... $$`
 
 ================================================================================
 4. REQUIRED JSON SCHEMA
@@ -340,7 +318,6 @@ def generate_and_verify_homework(chapter_pdf_path: str, pyq_pdf_path: str | None
     uploaded_pyq = client.files.upload(file=pyq_pdf_path) if pyq_pdf_path and os.path.exists(pyq_pdf_path) else None
 
     system_prompt = construct_australian_system_prompt(year_level, req_mcq, req_saq, req_laq)
-
     difficulty_instruction = f"DIFFICULTY LEVEL: {difficulty.upper()}.\n"
     keywords_instruction = f"FOCUS KEYWORDS: {custom_keywords}\n" if custom_keywords.strip() else ""
 
@@ -351,7 +328,7 @@ Output valid JSON only."""
 
     try:
         model_errors = {}
-        active_models = get_available_models(client)
+        active_models = get_available_models(api_key)
 
         for model_name in active_models:
             conversation_contents = [uploaded_chapter]
@@ -374,15 +351,14 @@ Output valid JSON only."""
                     parsed_json = json.loads(sanitized)
                     is_valid, validation_msg = verify_assessment_json(parsed_json, req_mcq, req_saq, req_laq)
 
-                    if is_valid:
-                        return parsed_json
+                    if is_valid: return parsed_json
 
                     conversation_contents.extend([response.text, f"VALIDATION ERROR: {validation_msg}\nRegenerate."])
                 except Exception as err:
                     model_errors[model_name] = str(err)
                     break
 
-        raise RuntimeError(f"All model fallbacks failed:\n" + "\n".join([f"• {m}: {e}" for m, e in model_errors.items()]))
+        raise RuntimeError(f"All models failed:\n" + "\n".join([f"• {m}: {e}" for m, e in model_errors.items()]))
     finally:
         try: client.files.delete(name=uploaded_chapter.name)
         except: pass
@@ -569,20 +545,22 @@ if generate_clicked:
         progress_bar = st.progress(0); status_box = st.empty()
 
         try:
-            progress_bar.progress(10); status_box.info(random.choice(TIER_1_MESSAGES)); time.sleep(1)
+            progress_bar.progress(10); status_box.info(random.choice(TIER_1_MESSAGES))
             progress_bar.progress(25); status_box.info(random.choice(TIER_2_MESSAGES))
 
             assessment_json = generate_and_verify_homework(temp_chapter_pdf, temp_pyq_pdf, api_key, year_level, difficulty, custom_keywords, req_mcq, req_saq, req_laq)
 
-            progress_bar.progress(50); status_box.info(random.choice(TIER_3_MESSAGES)); time.sleep(1)
+            progress_bar.progress(50); status_box.info(random.choice(TIER_3_MESSAGES))
             markdown_content = json_to_markdown(assessment_json, selected_date)
+            
             progress_bar.progress(68); status_box.info(random.choice(TIER_4_MESSAGES))
             build_base_docx(markdown_content, docx_output_path)
+            
             progress_bar.progress(85); status_box.info(random.choice(TIER_5_MESSAGES))
             style_assessment_docx(docx_output_path)
             pdf_success = convert_docx_to_pdf(docx_output_path, pdf_output_path)
 
-            progress_bar.progress(100); status_box.success(random.choice(TIER_6_MESSAGES)); time.sleep(0.8)
+            progress_bar.progress(100); status_box.success(random.choice(TIER_6_MESSAGES))
 
             with open(docx_output_path, "rb") as f_docx: docx_bytes = f_docx.read()
             pdf_bytes = open(pdf_output_path, "rb").read() if pdf_success and os.path.exists(pdf_output_path) else None
