@@ -160,15 +160,15 @@ def repair_math_syntax(text: str) -> str:
     text = text.replace('\r\n', '\n').replace('\r', '\n')
     text = re.sub(r'\\([()])', r'\1', text)
 
-    # 2. Fix Double Exponents and Enthalpy formatting
+    # 2. GREEDY ENTHALPY FIX: Ruthlessly swallow duplicate/mangled units up to the next valid word
     text = re.sub(r'\^?\{\s*-?1\s*\}\s*\\wedge\s*\{\s*-?1\s*\}', '^{-1}', text)
     text = re.sub(
-        r'(\$?)\s*(?:with\s+)?(?:\\?Delta\s*)?H\s*=\s*(-?\d+(?:\.\d+)?)\s*(?:kJ\s*(?:~|\\?\s)*mol\^?\{?-?1\}?|\^?\{?-?1\}?|kJ\/mol|kJ\s*mol\^\{-1\}\\wedge\{-1\})?\s*(\$?)',
-        r' $\\Delta H = \2\\text{ kJ mol}^{-1}$ ',
+        r'\$?\s*(?:with\s+)?(?:\\?[Dd]elta\s*)?H\s*=\s*(-?\d+(?:\.\d+)?)\s*(?:\\text\s*\{)?\s*(?:[kK]?[Jj](?:[\s~]*mol\^?\{?-?1\}?|/mol)?\s*\}?\s*)+\$?',
+        r' $\\Delta H = \1\\text{ kJ mol}^{-1}$ ',
         text
     )
 
-    # 3. Fix Empty Base Box Issue (L$^{-1}$ or L^{-1} -> $\text{L}^{-1}$)
+    # 3. Empty Base Box Issue (L$^{-1}$ or L^{-1} -> $\text{L}^{-1}$)
     text = re.sub(r'\b([A-Za-z]+)\s*\$\^', r'$\1^', text)
     text = re.sub(r'\b([A-Za-z]+)\s*\^\{?(-?\d+)\}?', r'$\1^{\2}$', text)
 
@@ -179,7 +179,7 @@ def repair_math_syntax(text: str) -> str:
     for i, line in enumerate(lines):
         if any(arr in line for arr in [r'\rightarrow', r'\rightleftharpoons', r'\to', '→', '⇌']):
             stripped = line.strip()
-            if not stripped.startswith('$') and not stripped.endswith('$'):
+            if not (stripped.startswith('$$') and stripped.endswith('$$')):
                 clean_line = line.replace('$', '') # Avoid nested dollars
                 lines[i] = f"$${clean_line.strip()}$$"
     text = '\n'.join(lines)
@@ -192,15 +192,31 @@ def repair_math_syntax(text: str) -> str:
         if i % 2 == 0:
             # OUTSIDE MATH MODE: Fast replacement for orphaned macros
             chunk = parts[i]
-            chunk = re.sub(r'(\\[a-zA-Z]+(?:\{[^\}]*\})?_?\{?[A-Za-z0-9+-]*\}?(?:\([aqslg]+\))?)', r'$\1$', chunk)
-            chunk = re.sub(r'\b([A-Z][a-z]?_\{?[0-9]+\}?[A-Za-z0-9_]*)\b', r'$\1$', chunk)
+            # Wrap \text{...}_... into math mode
+            chunk = re.sub(r'(\\[a-zA-Z]+(?:\{[^\}]*\})?_\{?[A-Za-z0-9+-]*\}?(?:\([aqslg]+\))?)', r'$\1$', chunk)
+            # Catch orphaned chemical formulas with underscores (e.g. AgNO_3(aq)) to prevent markdown italic swallowing
+            chunk = re.sub(r'(?<![\$\\a-zA-Z])([A-Z][A-Za-z0-9\(\)\[\]]*_\{?[a-zA-Z0-9+-]+\}?(?:\([aqslg]+\))?)(?![\$a-zA-Z])', r'$\1$', chunk)
             parts[i] = chunk
         else:
             # INSIDE MATH MODE: Un-fuse words by actively injecting \text{ } around English vocabulary
             chunk = parts[i]
+            
+            # Protect existing \text{...} to prevent nesting errors (\text{ kJ \text{ mol } })
+            protected_texts = []
+            def stash_text(m):
+                protected_texts.append(m.group(0))
+                return f"___TEXTBLOCK_{len(protected_texts)-1}___"
+            
+            chunk = re.sub(r'\\text\s*\{[^\}]+\}', stash_text, chunk)
+            
+            # Apply word unfuser safely
             stopwords = r'\b(mol|mL|g|L|kg|kPa|atm|of|and|is|with|mixed|excess|solution|precipitate|mass|yield|sample|solid|formed|produced|reacts|the|in|to|from|contains|gas|at|conditions|determine|calculate|which|reactant|volume)\b'
             chunk = re.sub(stopwords, r'\\text{ \1 }', chunk, flags=re.IGNORECASE)
-            chunk = re.sub(r'\\text\{\s*\\text\{\s*([^}]+)\s*\}\s*\}', r'\\text{ \1 }', chunk)
+            
+            # Restore \text{...}
+            for j, block in enumerate(protected_texts):
+                chunk = chunk.replace(f"___TEXTBLOCK_{j}___", block)
+            
             parts[i] = chunk
 
     text = '$'.join(parts)
