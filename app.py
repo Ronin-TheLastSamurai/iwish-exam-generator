@@ -58,8 +58,8 @@ STATIC_MODELS_TO_TRY = [
 # ---------------------------------------------------------
 # HINGLISH "MAGIC IN PROGRESS" MESSAGES
 # ---------------------------------------------------------
-TIER_1_MESSAGES = ["Mendeleev aur Newton ki aatma ko summon kiya jaa raha hai... 🧙‍♂️✨", "Chai ka cup utha lijiye, homework ka asli jaadu ab shuru ho raha hai... ☕🪄", "PDF ko AI ke hawaale kar diya hai, ab bas aage ka tamasha dekhiye... 🍿🚀"]
-TIER_2_MESSAGES = ["Aapki PDF aise padhi jaa rahi hai jaise exam ki raat 3 baje padhai hoti hai... 📖⚡", "AI poori PDF ko ghol ke pee raha hai, ek-ek concept dhoondh raha hai... 🧪🔍", "Topper ki tarah line-by-line scanning chalu hai taaki kuch na chhoote... 🧐📄"]
+TIER_1_MESSAGES = ["Mendeleev aur Newton ki aatma ko summon kiya jaa raha hai... 🧙‍♂️✨", "Chai ka cup utha lijiye, homework ka asli jaadu ab shuru ho raha hai... ☕🪄", "PDF ko AI ke hawaale kar diya hai... 🍿🚀"]
+TIER_2_MESSAGES = ["Aapki PDF aise padhi jaa rahi hai jaise exam ki raat 3 baje padhai hoti hai... 📖⚡", "Topper ki tarah line-by-line scanning chalu hai... 🧐📄"]
 TIER_3_MESSAGES = ["Aise homework questions dhoondh rahe hain jise dekh ke bachhe Google karna bhool jayein... 🤯📚", "Numerical aise set ho rahe hain jisme calculator bhi haath khade kar de... 🧮🔥"]
 TIER_4_MESSAGES = ["Option B aur C mein thoda sa dimaag ka dahi karne wala twist daal rahe hain... 😈🎯", "Option elimination method ki dhajjiyan udane wala kaam chal raha hai... 🧠🌪️"]
 TIER_5_MESSAGES = ["Homework ko ekdum masoom look de rahe hain taaki pehle lage ki kitna aasan hai... 😇📝", "Page layout aur fonts ekdum aesthetic set ho rahe hain... 🎨📄"]
@@ -76,7 +76,6 @@ def sanitize_raw_json_string(raw_json_str: str) -> str:
     return cleaned.strip()
 
 def verify_assessment_json(data: dict, req_mcq: int, req_saq: int, req_laq: int) -> tuple[bool, str]:
-    """Strictly validates JSON structure. (Zero math validation required due to Unicode Translation)"""
     if not isinstance(data, dict): return False, "Response root must be a valid JSON object."
     
     mcqs = data.get("multiple_choice_questions", [])
@@ -90,17 +89,18 @@ def verify_assessment_json(data: dict, req_mcq: int, req_saq: int, req_laq: int)
     return True, "Valid"
 
 def translate_to_unicode(text: str) -> str:
-    """THE DETERMINISTIC UNICODE TRANSLATION ENGINE: 
-    Converts raw text/pseudo-LaTeX into perfectly unbreakable Unicode characters."""
+    """THE DETERMINISTIC UNICODE TRANSLATION ENGINE"""
     if not text: return ""
 
     # 1. Clean invisible characters and aggressively strip ALL dollar signs
     text = text.replace('\u00a0', ' ').replace('\u202f', ' ').replace('\u200b', '').replace('\ufeff', '')
     text = text.replace('$', '')
     
-    # 2. Strip \text{} wrappers entirely (leaving the text inside intact)
+    # 2. Strip \text{} wrappers entirely and clean LaTeX artifacts
     text = re.sub(r'\\text\s*\{([^\}]+)\}', r'\1', text)
     text = re.sub(r'\\([()])', r'\1', text) # Unescape parentheses
+    text = re.sub(r'\\?wedge\s*\{\s*-?1\s*\}', '⁻¹', text) # Remove wedge artifacts
+    text = re.sub(r'\^?\\?wedge\s*\{\s*-?1\s*\}', '⁻¹', text)
     
     # 3. Standardize Chemical Arrows and Symbols
     text = text.replace(r'\rightarrow', '→').replace('-->', '→').replace('->', '→')
@@ -114,7 +114,6 @@ def translate_to_unicode(text: str) -> str:
         r'ΔH = \1 kJ mol⁻¹',
         text
     )
-    text = re.sub(r'\\wedge\s*\{\s*-?1\s*\}', '', text) # Delete leftover wedge artifacts
 
     # 5. Translate Superscripts (Matches ^{3+} or ^3)
     def make_super(m):
@@ -129,16 +128,26 @@ def translate_to_unicode(text: str) -> str:
     text = re.sub(r'_\{([^}]+)\}', make_sub, text)
     text = re.sub(r'_([0-9a-zA-Z+-]+)', make_sub, text)
 
-    # 7. Un-fuse specific English words if the AI squished them
+    # 7. Formatting fixes for Data Blocks (Molar Masses)
+    text = re.sub(r'([A-Za-z₀-₉₍₎]+)\s*=\s*(\d)', r'\1 = \2', text) # Adds space around '='
+    text = re.sub(r'(\d)\s*g\s*mol', r'\1 g mol', text)             # Adds space before 'g mol'
+    text = re.sub(r',\s*([A-Z])', r', \1', text)                    # Adds space after comma
+
+    # 8. Un-fuse specific English words if the AI squished them
     text = re.sub(r'(\d+(?:\.\d+)?)\s*molof\b', r'\1 mol of', text, flags=re.IGNORECASE)
     text = re.sub(r'(\d+(?:\.\d+)?)\s*mLof\b', r'\1 mL of', text, flags=re.IGNORECASE)
     text = re.sub(r'(\d+(?:\.\d+)?)\s*gof\b', r'\1 g of', text, flags=re.IGNORECASE)
     text = re.sub(r'\)and(\d)', r') and \1', text)
-    text = re.sub(r' +', ' ', text)
 
+    # 9. THE BIDIRECTIONAL ISOLATOR: Forces equations onto their own lines safely
+    text = re.sub(r'(equation:)\s+([A-Z0-9])', r'\1\n\n\2', text, flags=re.IGNORECASE)
+    text = re.sub(r'(reaction:)\s+([A-Z0-9])', r'\1\n\n\2', text, flags=re.IGNORECASE)
+    text = re.sub(r'(\([aqslg]\)|mol⁻¹|kJ)\s+([A-Z][a-z]+)', r'\1\n\n\2', text) # e.g., (g) In an experiment...
+    
+    text = re.sub(r' +', ' ', text)
     return text.strip()
 
-# CACHED API POLLING: Instant dynamic fallback list
+# CACHED API POLLING
 @st.cache_data(ttl=3600, show_spinner=False)
 def get_available_models(api_key: str) -> list[str]:
     candidates = []
@@ -174,6 +183,7 @@ CRITICAL RULE: PLAIN TEXT UNICODE ONLY (NO LATEX MATH MODE)
 ================================================================================
 - DO NOT USE DOLLAR SIGNS (`$`) EVER.
 - DO NOT USE THE `\\text{{}}` COMMAND.
+- ALWAYS put chemical equations on their own line! Hit Enter twice before and after any equation containing an arrow.
 - Write chemical formulas strictly using underscores for subscripts and carets for superscripts.
   * CORRECT: H_2SO_4(aq)
   * CORRECT: Fe^{{3+}}
@@ -314,8 +324,8 @@ def style_assessment_docx(docx_path: str, logo_img_path: str = "iwish_logo.jpg")
             p.paragraph_format.space_after = Pt(8); p.paragraph_format.keep_with_next = True; p.paragraph_format.keep_together = True
             continue
 
-        # Centers chemical equations dynamically without relying on oMath
-        if ('→' in text or '⇌' in text) and any(state in text for state in ['(aq)', '(s)', '(l)', '(g)']):
+        # SMART CENTERING: Only center if it contains an arrow AND is isolated (short length, no plain English prose)
+        if ('→' in text or '⇌' in text) and len(text) < 150 and "according to" not in text and "experiment" not in text:
             p.paragraph_format.alignment = WD_ALIGN_PARAGRAPH.CENTER
             p.paragraph_format.space_before = Pt(6); p.paragraph_format.space_after = Pt(6)
             continue
