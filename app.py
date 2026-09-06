@@ -294,7 +294,7 @@ TIER_5_MESSAGES = [
     "Reaction arrows ekdum straight aur aligned set ho chuke hain... ➡️📏",
     "Spacing after Option D ko 12 pt fix kar rahe hain for breathing room... 🌬️📏",
     "Document formatting ka level 100/100 touch kar raha hai... 💯🎨",
-    "Aisa lag raha hai jaise kisi top institution ka assessment paper print ho raha ho... 🎓🏛️",
+    "Aisa lag raha jaise kisi top institution ka assessment paper print ho raha ho... 🎓🏛️",
     "Professional styling in progress: Zero clutter, pure elegance... ✨📄",
     "Sabhi fractions aur superscripts ko microscope se check kiya jaa raha hai... 🔬🔢",
     "Word document ban gaya hai, ab PDF pipeline mein transfer ho raha hai... 🔄📑",
@@ -405,15 +405,21 @@ def check_text_for_math_errors(text: str) -> tuple[bool, str]:
     if not text:
         return True, "Valid"
 
+    # 1. Parity check
     dollar_count = len(re.findall(r'(?<!\\)\$', text))
     if dollar_count % 2 != 0:
         return False, f"Unbalanced '$' delimiter detected (found {dollar_count} '$' signs). Every '$' must be closed."
 
-    math_blocks = re.findall(r'(?<!\\)\$([^\$]+)\$', text)
-    stopwords = r'\b(is|are|was|were|in|into|absorbed|with|from|than|to|of|the|and|reacting|directly|gas|rather|take|place|vessel|which|calculate|determine|explain|identify|predict|describe)\b'
-    for block in math_blocks:
-        if len(re.findall(stopwords, block, re.IGNORECASE)) >= 2:
-            return False, f"Runaway math block detected containing English text: '${block[:35]}...$'"
+    # 2. Check for squished words
+    if re.search(r'\b\d+(?:\.\d+)?\s*(?:molof|mLof|gof)\b', text, re.IGNORECASE):
+        return False, "Fused unit detected (e.g., 'molof' or 'mLof'). Ensure units and words like 'of' are separate plain text."
+
+    # 3. Check for chemical equation missing an arrow
+    has_state_symbols = len(re.findall(r'\((?:s|l|g|aq)\)', text)) >= 2
+    has_reactants_plus = '+' in text
+    has_arrow = any(sym in text for sym in [r'\rightarrow', r'\rightleftharpoons', r'\to', '→', '⇌'])
+    if has_state_symbols and has_reactants_plus and not has_arrow:
+        return False, "Chemical reaction detected without a reaction arrow (\\rightarrow or \\rightleftharpoons)."
 
     return True, "Valid"
 
@@ -482,27 +488,90 @@ def verify_assessment_json(data: dict, req_mcq: int, req_saq: int, req_laq: int)
 
 
 def repair_math_syntax(text: str) -> str:
+    """Bulletproof deterministic post-processor: un-fuses words, fixes enthalpy, inserts missing arrows, and preserves math blocks."""
     if not text:
         return ""
 
-    text = re.sub(r'\(\$([A-Za-z0-9_\\\^\{\}\s]+?)\)', r'($\1$)', text)
-    text = re.sub(r'\(\$([A-Za-z0-9_\\\^\{\}]+?)\s', r'($\1$) ', text)
+    # 1. Global word un-fusing
+    text = re.sub(r'(\d+(?:\.\d+)?)\s*molof\s*([A-Za-z0-9_])', r'\1 mol of \2', text)
+    text = re.sub(r'(\d+(?:\.\d+)?)\s*mLof\s*([A-Za-z0-9_])', r'\1 mL of \2', text)
+    text = re.sub(r'(\d+(?:\.\d+)?)\s*gof\s*([A-Za-z0-9_])', r'\1 g of \2', text)
+    text = re.sub(r'([a-zA-Z0-9_\)\}\]])and(\d+)', r'\1 and \2', text)
+    text = re.sub(r'([a-zA-Z0-9_\)\}\]])and([A-Za-z])', r'\1 and \2', text)
+    text = re.sub(r'\bmixed with(\d+)', r'mixed with \1', text)
+    text = re.sub(r'\bwith(\d+)', r'with \1', text)
+    text = re.sub(r'\)is\b', r') is ', text)
+    text = re.sub(r'([a-zA-Z0-9\)])is mixed with', r'\1 is mixed with', text)
+    text = re.sub(r'\$len~', r'', text)
 
-    def break_runaway_math(match):
-        content = match.group(1)
-        stopwords = r'\b(is|are|was|were|in|into|absorbed|with|from|than|to|of|the|and|reacting|directly|gas|rather|take|place|vessel|which|calculate|determine|explain|identify|predict|describe)\b'
-        words_found = len(re.findall(stopwords, content, re.IGNORECASE))
-        if words_found >= 2 or (content.count(' ') >= 4 and re.search(r'[a-zA-Z]{4,}', content)):
-            return content
+    # 2. Fix malformed enthalpy notations (e.g., 'with H = -197^{-1}')
+    text = re.sub(
+        r'\b(?:with\s+)?(?:\\?Delta\s*)?H\s*=\s*(-?\d+(?:\.\d+)?)\s*(?:\^?\{?-?1\}?|kJ\s*mol\^?\{?-?1\}?|kJ\/mol)?\b',
+        r'with $\\Delta H = \1\\text{ kJ mol}^{-1}$',
+        text
+    )
+
+    # 3. Detect and fix missing reaction arrows in chemical reactions
+    text = re.sub(
+        r'(\((?:s|l|g|aq)\))\s+(?!(?:and|or|with|react|is|to|in|at|which|by|produce|from|determine)\b)(\d*[A-Z][a-zA-Z0-9_\(\)]*\(?[a-z]*\)?(?:\s*[\+]|\s*\((?:s|l|g|aq)\)))',
+        r'\1 \\rightarrow \2',
+        text
+    )
+
+    # 4. Protect double-dollar blocks ($$ ... $$) so they are never touched
+    display_blocks = []
+    def stash_display(m):
+        display_blocks.append(m.group(0))
+        return f"___DISPLAYBLOCK_{len(display_blocks)-1}___"
+    text = re.sub(r'\$\$[^\$]+\$\$', stash_display, text)
+
+    # 5. Safe inline math processing: NEVER strip blocks containing arrows or math operators
+    def clean_inline(m):
+        content = m.group(1).strip()
+        # If it has chemistry arrows or standard math operators, KEEP IN MATH MODE
+        if any(sym in content for sym in [r'\rightarrow', r'\rightleftharpoons', r'\Delta', r'\times', r'\frac', '=', '→', '⇌']):
+            return f"${content}$"
+
+        # Check for plain English prose mistakenly trapped in math
+        stopwords = r'\b(is|are|was|were|in|into|absorbed|with|from|than|to|of|the|and|reacting|directly|rather|take|place|vessel|which|calculate|determine|explain|identify|predict|describe|mixed)\b'
+        words_found = re.findall(stopwords, content, re.IGNORECASE)
+
+        # Un-nest plain text prepositions from inside math
+        if words_found or content.count(' ') >= 3:
+            unwound = content
+            unwound = re.sub(r'\b(is mixed with|mixed with|is|of|and|with)\b', r'$ \1 $', unwound)
+            return unwound
+
         return f"${content}$"
 
-    text = re.sub(r'(?<!\\)\$([^\$]+)\$', break_runaway_math, text)
+    text = re.sub(r'(?<!\\)\$([^\$]+)\$', clean_inline, text)
 
+    # Clean up any empty or duplicated $$ created by unwinding
+    text = re.sub(r'\$\s*\$', ' ', text)
+
+    # Restore display blocks
+    for i, block in enumerate(display_blocks):
+        text = text.replace(f"___DISPLAYBLOCK_{i}___", block)
+
+    # 6. Ensure standalone reactions have proper math formatting for Pandoc
+    def ensure_equation_math(line):
+        if any(sym in line for sym in [r'\rightarrow', r'\rightleftharpoons', '→', '⇌']):
+            if not line.strip().startswith('$') and not line.strip().endswith('$'):
+                # Wrap bare reaction in math delimiters if not already inside
+                line = re.sub(
+                    r'((?:\d*[A-Z][a-zA-Z0-9_\(\)]*(?:\([s|l|g|aq]+\))?\s*[\+]\s*)+\d*[A-Z][a-zA-Z0-9_\(\)]*(?:\([s|l|g|aq]+\))?\s*(?:\\rightarrow|\\rightleftharpoons|→|⇌)\s*(?:\d*[A-Z][a-zA-Z0-9_\(\)]*(?:\([s|l|g|aq]+\))?\s*[\+]?\s*)+)',
+                    r'$\1$',
+                    line
+                )
+        return line
+
+    text = "\n".join([ensure_equation_math(line) for line in text.splitlines()])
+
+    # 7. Parity check: if an unclosed $ remains, close it
     dollar_count = len(re.findall(r'(?<!\\)\$', text))
     if dollar_count % 2 != 0:
         text = text + "$"
 
-    text = re.sub(r'\$\s+([^\$]+?)\s+\$', r'$\1$', text)
     return text
 
 
@@ -533,48 +602,45 @@ def get_available_models(client: genai.Client) -> list[str]:
 # DYNAMIC AUSTRALIAN CURRICULUM PROMPT GENERATOR
 # ---------------------------------------------------------
 def construct_australian_system_prompt(year_level: str, req_mcq: int, req_saq: int, req_laq: int) -> str:
-    """Dynamically generates system prompts tailored to the specific Australian Curriculum Year framework."""
-    
-    # 1. Year Level Specific Framework
     if year_level == "Year 6":
         curriculum_context = """CURRICULUM CONTEXT: Australian Curriculum (ACARA v9.0) - Year 6 Primary Science.
 - FOCUS: Observable properties, states of matter (solid, liquid, gas), reversible physical changes (melting, freezing, evaporating, condensing, dissolving) vs. irreversible chemical changes (rusting, burning, cooking, decaying).
-- SCIENCE INQUIRY SKILLS: Fair testing principles (identifying independent variable [what we change], dependent variable [what we measure], and controlled variables [what we keep the same]). Reading simple data tables, bar charts, and drawing observational conclusions.
-- PEDAGOGICAL LEVEL: Clear, engaging, accessible English. No complex molar mathematics or abstract subatomic quantum theory."""
+- SCIENCE INQUIRY SKILLS: Fair testing principles (identifying independent variable [what we change], dependent variable [what we measure], and controlled variables [what we keep the same]). Reading simple data tables and drawing observational conclusions.
+- PEDAGOGICAL LEVEL: Clear, engaging, accessible English. No complex molar mathematics."""
     elif year_level in ["Year 7", "Year 8"]:
         curriculum_context = """CURRICULUM CONTEXT: Australian Curriculum (ACARA v9.0) - Years 7-8 Junior Secondary Science (Chemical Sciences).
 - FOCUS:
-  * Particle model of matter (kinetic theory, arrangements and movement in solids, liquids, gases, gas pressure, expansion/contraction).
+  * Particle model of matter (kinetic theory, arrangements and movement in solids, liquids, gases, gas pressure).
   * Pure substances vs. mixtures (solutions, suspensions, colloids, solutes, solvents).
-  * Separation techniques (filtration, evaporation, simple distillation, chromatography, decanting, magnetism, centrifuging).
-  * Physical changes vs. chemical changes (signs of chemical change: color change, gas produced, precipitate formed, temperature change).
-  * Introduction to elements, compounds, mixtures, and the chemical symbols of common elements (H, O, C, N, Na, Cl, Fe, Cu). Simple word equations.
-- SCIENCE INQUIRY SKILLS: Designing controlled fair tests, writing hypotheses ("If... then..."), identifying systematic laboratory errors (e.g. wet filter paper, improper thermometer placement), and interpreting simple line graphs and scatter trends.
-- AUSTRALIAN REFERENCE BLUEPRINT: Model after authentic Australian National Assessment Science Inquiry items (ICAS Science, Big Science Competition, Australian Science Olympiads Junior)."""
+  * Separation techniques (filtration, evaporation, simple distillation, chromatography, decanting, centrifuging).
+  * Physical changes vs. chemical changes (color change, gas produced, precipitate formed, temperature change).
+  * Introduction to elements, compounds, mixtures, and common element symbols. Simple word equations.
+- SCIENCE INQUIRY SKILLS: Designing fair tests, writing hypotheses ("If... then..."), identifying laboratory errors (e.g. wet filter paper, improper thermometer placement), and interpreting line graphs.
+- AUSTRALIAN REFERENCE BLUEPRINT: Model after authentic Australian National Assessment Science Inquiry items (ICAS Science, Big Science Competition)."""
     elif year_level in ["Year 9", "Year 10"]:
         curriculum_context = """CURRICULUM CONTEXT: Australian Curriculum (ACARA v9.0) - Years 9-10 Middle Secondary Science (Chemical Sciences).
 - FOCUS:
   * Atomic structure (protons, neutrons, electrons, atomic number, mass number, electron configuration for elements 1-20).
-  * Periodic Table organization (groups, periods, metals, non-metals, metalloids, valence electrons, noble gases).
-  * Chemical reactions & conservation of mass: balancing basic chemical equations, synthesis, decomposition, combustion, corrosion, precipitation, acid-base neutralisation, acid-carbonate, and acid-metal reactions.
-  * Rates of reaction & collision theory: factors affecting rate (surface area, temperature, concentration, agitation, catalysts).
-- SCIENCE INQUIRY SKILLS: Distinguishing between accuracy (calibration/systematic errors), reliability (consistency across concordant trials, spotting outliers), and validity (controlling all external variables). Formulating operational definitions and deducing reaction products from observations.
+  * Periodic Table organization (groups, periods, metals, non-metals, valence electrons).
+  * Chemical reactions & conservation of mass: balancing equations, synthesis, combustion, precipitation, acid-base neutralisation, and acid-carbonate reactions.
+  * Rates of reaction & collision theory: factors affecting rate (surface area, temperature, concentration, catalysts).
+- SCIENCE INQUIRY SKILLS: Distinguishing between accuracy (calibration/systematic errors), reliability (consistency across concordant trials, spotting outliers), and validity (controlling external variables).
 - AUSTRALIAN REFERENCE BLUEPRINT: Model after Australian state junior science exam formats (NSW Stage 5 Science Valid, Victorian Year 10 Science benchmarks)."""
     else:  # Year 11 (ATAR) or Year 12 (ATAR)
         curriculum_context = f"""CURRICULUM CONTEXT: Australian Senior Secondary Chemistry ({year_level} ATAR - NESA NSW Stage 6 / VCAA VCE / QCE Chemistry).
 - FOCUS:
-  * Quantitative chemistry: mole calculations ($n = m/M$, $c = n/V$), limiting reagents, percentage yield, empirical and molecular formulas.
+  * Quantitative chemistry: mole calculations ($n = m/M$, $c = n/V$), limiting reagents, percentage yield.
   * Gas stoichiometry under Australian Standard Laboratory Conditions (SLC: $25^\\circ\\text{{C}} / 298.15\\text{{ K}}$ and $100\\text{{ kPa}}$, where molar volume $V_m = 24.79\\text{{ L mol}}^{{-1}}$). (NEVER use US STP 22.4 L/mol).
   * Equilibrium and reversible systems ($K_c$, reaction quotient $Q$, Le Chatelier's principle, collision theory rates vs. yield compromise).
-  * Acids and bases: Brønsted-Lowry theory, amphiprotic species, $K_a$, $pH$, $pOH$, buffer dynamics, titration curves, indicator selection, conjugate pairs.
-  * Thermochemistry: $\\Delta H$, calorimetry calculation using $c = 4.18\\text{{ J g}}^{{-1}}\\text{{ K}}^{{-1}}$, bond enthalpies.
-  * Organic chemistry & analysis: IUPAC nomenclature, isomerism, functional groups, condensation/addition polymers, IR & NMR spectral interpretation.
+  * Acids and bases: Brønsted-Lowry theory, amphiprotic species, $K_a$, $pH$, titration curves, indicator selection.
+  * Thermochemistry: $\\Delta H$, calorimetry calculation using $c = 4.18\\text{{ J g}}^{{-1}}\\text{{ K}}^{{-1}}$.
+  * Organic chemistry & analysis: IUPAC nomenclature, functional groups, spectral interpretation.
 - AUSTRALIAN ATAR COMMAND VERBS: Every short/long answer prompt must be anchored by official NESA/VCAA verbs:
   * "Explain in terms of...": Link cause and effect at the sub-microscopic/molecular level.
   * "Justify": Support conclusions by contrasting against an alternative scenario.
   * "Assess" / "Evaluate": Make evidence-based judgments (e.g. evaluating industrial compromises or experimental validity).
   * "Deduce": Derive an identity or trend from qualitative or quantitative data tables.
-- WORKING SCIENTIFICALLY (EXPERIMENTAL RIGOR): At least 40% of short/long questions must involve laboratory investigations (titration error analysis, glassware rinsing procedures [water vs. titrant], spirit burner heat loss, outlier identification across repeated trials).
+- WORKING SCIENTIFICALLY (EXPERIMENTAL RIGOR): At least 40% of short/long questions must involve laboratory investigations (titration error analysis, glassware rinsing procedures [water vs. titrant], outlier identification across repeated trials).
 - AUSTRALIAN REFERENCE BLUEPRINT: Model after authentic NSW HSC Chemistry and Victorian VCE Chemistry Section I and Section II past examination papers."""
 
     return f"""You are a Chief Examination Item Writer and Senior Curriculum Assessor for the Australian Secondary School System.
@@ -587,7 +653,7 @@ Your objective is to craft an authentic, curriculum-aligned Australian Examinati
 - [DOCUMENT 1: CHAPTER PDF] defines the absolute syllabus boundary. Every question, scenario, substance, and calculation MUST originate 100% from this text.
 - If a Past Examination Paper (PYQ) is provided [DOCUMENT 2], it serves SOLELY as an ARCHETYPE and PHRASING BLUEPRINT.
 - NEVER copy past paper questions verbatim. Clone the inquiry structure, multi-part style, and question framing, but populate them exclusively with the concepts and data from Document 1.
-- NEVER import unrelated topics from Document 2. If Document 2 contains topics outside Document 1 (e.g., organic synthesis when Document 1 covers particle theory), discard those topics completely.
+- NEVER import unrelated topics from Document 2. If Document 2 contains topics outside Document 1, discard those topics completely.
 
 ================================================================================
 2. PEDAGOGICAL & AUSTRALIAN CURRICULUM STANDARDS FOR {year_level.upper()}
@@ -603,16 +669,29 @@ Your objective is to craft an authentic, curriculum-aligned Australian Examinati
 - ZERO META-LANGUAGE: Never write "refer to the text", "based on the chapter", or "according to the notes provided".
 
 ================================================================================
-4. BULLETPROOF TYPOGRAPHY & LATEX DELIMITERS
+4. BULLETPROOF TYPOGRAPHY & LATEX RULES (STRICT NON-NEGOTIABLE)
 ================================================================================
-- Wrap all inline formulas, units, variables, and values tightly in single dollar signs:
-  * Correct: $H_2SO_4$, $\\text{{Fe}}^{{3+}}$, $\\Delta H = -92.2\\text{{ kJ mol}}^{{-1}}$, $K_a = 1.8 \\times 10^{{-5}}$, $25.00\\text{{ mL}}$, $4.18\\text{{ J g}}^{{-1}}\\text{{ K}}^{{-1}}$.
-- Wrap all standalone equations and reactions in double dollar signs:
-  $$\\text{{CaCO}}_3(s) + 2\\text{{HCl}}(aq) \\rightarrow \\text{{CaCl}}_2(aq) + \\text{{H}}_2\\text{{O}}(l) + \\text{{CO}}_2(g)$$
-- Delimiter syntax rules:
-  * Keep dollar signs tightly wrapped around the formula only: write '($SO_3$)', NEVER '($SO_3)' or '$ (SO_3) $'.
-  * NEVER include English prose inside math mode: NEVER write '$SO_3 gas is absorbed$'.
-  * Double-escape all LaTeX backslashes inside JSON strings (e.g. `\\\\text{{}}`, `\\\\Delta`, `\\\\rightarrow`).
+1. NEVER BUNDLE ENGLISH WORDS OR UNITS INSIDE MATH MODE:
+   * FORBIDDEN: "$50.0 mL of 1.00 mol L^{-1} Pb(NO_3)_2 is mixed with 75 mL of 0.500 mol L^{-1} KI$"
+   * FORBIDDEN: "$2.0 mol of N_2(g) and 10 mol of H_2(g)$"
+   * FORBIDDEN: "$10 mol of NH_3$"
+   * CORRECT: "50.0 mL of 1.00 mol L$^{{-1}}$ $\\text{{Pb(NO}}_3)_2$ is mixed with 75 mL of 0.500 mol L$^{{-1}}$ $\\text{{KI}}$"
+   * CORRECT: "When 2.0 mol of $\\text{{N}}_2(g)$ and 10 mol of $\\text{{H}}_2(g)$ react according to..."
+   * Numbers, units (mL, g, mol, L), and English words (of, and, is, with, mixed, react) MUST BE PLAIN TEXT OUTSIDE DOLLAR SIGNS.
+
+2. CHEMICAL REACTIONS MUST ALWAYS HAVE ARROWS:
+   * Every reaction MUST use a standard LaTeX arrow: `\\rightarrow` or `\\rightleftharpoons`.
+   * FORBIDDEN: "2SO_2(g) + O_2(g) 2SO_3(g)" (NEVER omit the arrow!)
+   * WRAP FULL REACTIONS IN DOUBLE DOLLAR SIGNS:
+     $$\\text{{2SO}}_2(g) + \\text{{O}}_2(g) \\rightleftharpoons \\text{{2SO}}_3(g)$$
+     $$\\text{{CaCO}}_3(s) + 2\\text{{HCl}}(aq) \\rightarrow \\text{{CaCl}}_2(aq) + \\text{{H}}_2\\text{{O}}(l) + \\text{{CO}}_2(g)$$
+
+3. ENTHALPY NOTATION:
+   * ALWAYS include the Delta symbol (\\Delta) and full units: "$\\Delta H = -197\\text{{ kJ mol}}^{{-1}}$".
+   * NEVER write "with H = -197^{{-1}}".
+
+4. ESCAPING:
+   * Double-escape all LaTeX backslashes inside JSON strings (e.g. `\\\\text{{}}`, `\\\\Delta`, `\\\\rightarrow`, `\\\\rightleftharpoons`).
 
 ================================================================================
 5. REQUIRED JSON SCHEMA
@@ -664,10 +743,8 @@ EXACT COUNTS TO GENERATE:
 def generate_and_verify_homework(chapter_pdf_path: str, pyq_pdf_path: str | None, api_key: str, year_level: str, difficulty: str, custom_keywords: str, req_mcq: int, req_saq: int, req_laq: int) -> dict:
     client = genai.Client(api_key=api_key)
     
-    # Upload Chapter PDF (Mandatory)
     uploaded_chapter = client.files.upload(file=chapter_pdf_path)
     
-    # Upload PYQ PDF (Optional)
     uploaded_pyq = None
     if pyq_pdf_path and os.path.exists(pyq_pdf_path):
         uploaded_pyq = client.files.upload(file=pyq_pdf_path)
@@ -720,6 +797,11 @@ IMPORTANT INSTRUCTIONS REGARDING ATTACHMENTS:
 """
 
     user_prompt += f"""
+CRITICAL REMINDER:
+- NEVER bundle words like 'of', 'and', 'with', 'is' or numbers and units inside math mode.
+- ALL chemical reactions MUST have arrows: \\rightarrow or \\rightleftharpoons.
+- Enthalpy MUST be formatted as $\\Delta H = -197\\text{{ kJ mol}}^{{-1}}$.
+
 Ensure EXACT question counts: {req_mcq} MCQs, {req_saq} Short Answer, and {req_laq} Long Answer questions.
 Do NOT include marks, points, or dotted writing lines. Output valid JSON only."""
 
@@ -753,7 +835,7 @@ Do NOT include marks, points, or dotted writing lines. Output valid JSON only.""
                         return parsed_json
 
                     conversation_contents.append(response.text)
-                    conversation_contents.append(f"VALIDATION ERROR: {validation_msg}\nEnsure every '$' is closed and parentheses are outside '$'. Regenerate.")
+                    conversation_contents.append(f"VALIDATION ERROR: {validation_msg}\nFix all math/unit issues and regenerate.")
                 except Exception as err:
                     model_errors[model_name] = str(err)
                     break
@@ -1066,7 +1148,6 @@ if not api_key:
     if not api_key:
         st.sidebar.warning("API Key required to run the generator.")
 
-# Grade / Year Selection (Years 6 to 12)
 year_level = st.sidebar.selectbox(
     "🎓 Grade / Year Level",
     options=[
@@ -1084,7 +1165,6 @@ year_level = st.sidebar.selectbox(
 
 selected_date = st.sidebar.date_input("Homework Date", value=datetime.date.today()).strftime("%d.%m.%Y")
 
-# Difficulty Level Selector
 difficulty = st.sidebar.select_slider(
     "📊 Difficulty Level",
     options=["Easy", "Medium", "Difficult"],
@@ -1100,7 +1180,6 @@ req_laq = st.sidebar.slider("Long Answer Questions", min_value=0, max_value=10, 
 if req_mcq + req_saq + req_laq == 0:
     st.sidebar.error("Select at least 1 question to generate.")
 
-# Optional Subtopic / Keyword Focus Checkbox
 enable_keywords = st.sidebar.checkbox("🎯 Target Specific Subtopics / Keywords", value=False)
 custom_keywords = ""
 if enable_keywords:
@@ -1110,7 +1189,6 @@ if enable_keywords:
         help="Gemini will allocate at least 60% of questions to these concepts."
     )
 
-# Dual PDF Upload Slots
 st.subheader("📁 Document Inputs")
 col_upload1, col_upload2 = st.columns(2)
 
@@ -1176,7 +1254,7 @@ if generate_clicked:
             progress_bar.progress(25)
             status_box.info(random.choice(TIER_2_MESSAGES))
 
-            # Backend AI Generation with Australian Curriculum & PYQ Adaptation
+            # Backend AI Generation
             assessment_json = generate_and_verify_homework(
                 chapter_pdf_path=temp_chapter_pdf,
                 pyq_pdf_path=temp_pyq_pdf,
