@@ -410,7 +410,7 @@ def check_text_for_math_errors(text: str) -> tuple[bool, str]:
         return False, f"Unbalanced '$' delimiter detected (found {dollar_count} '$' signs). Every '$' must be closed."
 
     math_blocks = re.findall(r'(?<!\\)\$([^\$]+)\$', text)
-    stopwords = r'\b(is|are|was|were|in|into|absorbed|with|from|than|to|of|the|and|reacting|directly|gas|rather|take|place|vessel|which|calculate|determine|explain)\b'
+    stopwords = r'\b(is|are|was|were|in|into|absorbed|with|from|than|to|of|the|and|reacting|directly|gas|rather|take|place|vessel|which|calculate|determine|explain|identify|predict|describe)\b'
     for block in math_blocks:
         if len(re.findall(stopwords, block, re.IGNORECASE)) >= 2:
             return False, f"Runaway math block detected containing English text: '${block[:35]}...$'"
@@ -490,7 +490,7 @@ def repair_math_syntax(text: str) -> str:
 
     def break_runaway_math(match):
         content = match.group(1)
-        stopwords = r'\b(is|are|was|were|in|into|absorbed|with|from|than|to|of|the|and|reacting|directly|gas|rather|take|place|vessel|which|calculate|determine|explain)\b'
+        stopwords = r'\b(is|are|was|were|in|into|absorbed|with|from|than|to|of|the|and|reacting|directly|gas|rather|take|place|vessel|which|calculate|determine|explain|identify|predict|describe)\b'
         words_found = len(re.findall(stopwords, content, re.IGNORECASE))
         if words_found >= 2 or (content.count(' ') >= 4 and re.search(r'[a-zA-Z]{4,}', content)):
             return content
@@ -507,7 +507,6 @@ def repair_math_syntax(text: str) -> str:
 
 
 def get_available_models(client: genai.Client) -> list[str]:
-    """Queries live Gemini API to detect active supported models, prioritizing our Top 10."""
     candidates = []
     try:
         models_pager = client.models.list()
@@ -519,12 +518,10 @@ def get_available_models(client: genai.Client) -> list[str]:
         pass
 
     combined = []
-    # Prioritize our curated Top 10 models in order
     for m in STATIC_MODELS_TO_TRY:
         if m not in combined:
             combined.append(m)
 
-    # Append any additional live candidates (avoiding deprecated gemini-2.5-flash)
     for m in candidates:
         if m not in combined and "2.5-flash" not in m:
             combined.append(m)
@@ -532,66 +529,209 @@ def get_available_models(client: genai.Client) -> list[str]:
     return combined
 
 
-def generate_and_verify_homework(pdf_path: str, api_key: str, req_mcq: int, req_saq: int, req_laq: int) -> dict:
-    client = genai.Client(api_key=api_key)
-    uploaded_file = client.files.upload(file=pdf_path)
+# ---------------------------------------------------------
+# DYNAMIC AUSTRALIAN CURRICULUM PROMPT GENERATOR
+# ---------------------------------------------------------
+def construct_australian_system_prompt(year_level: str, req_mcq: int, req_saq: int, req_laq: int) -> str:
+    """Dynamically generates system prompts tailored to the specific Australian Curriculum Year framework."""
+    
+    # 1. Year Level Specific Framework
+    if year_level == "Year 6":
+        curriculum_context = """CURRICULUM CONTEXT: Australian Curriculum (ACARA v9.0) - Year 6 Primary Science.
+- FOCUS: Observable properties, states of matter (solid, liquid, gas), reversible physical changes (melting, freezing, evaporating, condensing, dissolving) vs. irreversible chemical changes (rusting, burning, cooking, decaying).
+- SCIENCE INQUIRY SKILLS: Fair testing principles (identifying independent variable [what we change], dependent variable [what we measure], and controlled variables [what we keep the same]). Reading simple data tables, bar charts, and drawing observational conclusions.
+- PEDAGOGICAL LEVEL: Clear, engaging, accessible English. No complex molar mathematics or abstract subatomic quantum theory."""
+    elif year_level in ["Year 7", "Year 8"]:
+        curriculum_context = """CURRICULUM CONTEXT: Australian Curriculum (ACARA v9.0) - Years 7-8 Junior Secondary Science (Chemical Sciences).
+- FOCUS:
+  * Particle model of matter (kinetic theory, arrangements and movement in solids, liquids, gases, gas pressure, expansion/contraction).
+  * Pure substances vs. mixtures (solutions, suspensions, colloids, solutes, solvents).
+  * Separation techniques (filtration, evaporation, simple distillation, chromatography, decanting, magnetism, centrifuging).
+  * Physical changes vs. chemical changes (signs of chemical change: color change, gas produced, precipitate formed, temperature change).
+  * Introduction to elements, compounds, mixtures, and the chemical symbols of common elements (H, O, C, N, Na, Cl, Fe, Cu). Simple word equations.
+- SCIENCE INQUIRY SKILLS: Designing controlled fair tests, writing hypotheses ("If... then..."), identifying systematic laboratory errors (e.g. wet filter paper, improper thermometer placement), and interpreting simple line graphs and scatter trends.
+- AUSTRALIAN REFERENCE BLUEPRINT: Model after authentic Australian National Assessment Science Inquiry items (ICAS Science, Big Science Competition, Australian Science Olympiads Junior)."""
+    elif year_level in ["Year 9", "Year 10"]:
+        curriculum_context = """CURRICULUM CONTEXT: Australian Curriculum (ACARA v9.0) - Years 9-10 Middle Secondary Science (Chemical Sciences).
+- FOCUS:
+  * Atomic structure (protons, neutrons, electrons, atomic number, mass number, electron configuration for elements 1-20).
+  * Periodic Table organization (groups, periods, metals, non-metals, metalloids, valence electrons, noble gases).
+  * Chemical reactions & conservation of mass: balancing basic chemical equations, synthesis, decomposition, combustion, corrosion, precipitation, acid-base neutralisation, acid-carbonate, and acid-metal reactions.
+  * Rates of reaction & collision theory: factors affecting rate (surface area, temperature, concentration, agitation, catalysts).
+- SCIENCE INQUIRY SKILLS: Distinguishing between accuracy (calibration/systematic errors), reliability (consistency across concordant trials, spotting outliers), and validity (controlling all external variables). Formulating operational definitions and deducing reaction products from observations.
+- AUSTRALIAN REFERENCE BLUEPRINT: Model after Australian state junior science exam formats (NSW Stage 5 Science Valid, Victorian Year 10 Science benchmarks)."""
+    else:  # Year 11 (ATAR) or Year 12 (ATAR)
+        curriculum_context = f"""CURRICULUM CONTEXT: Australian Senior Secondary Chemistry ({year_level} ATAR - NESA NSW Stage 6 / VCAA VCE / QCE Chemistry).
+- FOCUS:
+  * Quantitative chemistry: mole calculations ($n = m/M$, $c = n/V$), limiting reagents, percentage yield, empirical and molecular formulas.
+  * Gas stoichiometry under Australian Standard Laboratory Conditions (SLC: $25^\\circ\\text{{C}} / 298.15\\text{{ K}}$ and $100\\text{{ kPa}}$, where molar volume $V_m = 24.79\\text{{ L mol}}^{{-1}}$). (NEVER use US STP 22.4 L/mol).
+  * Equilibrium and reversible systems ($K_c$, reaction quotient $Q$, Le Chatelier's principle, collision theory rates vs. yield compromise).
+  * Acids and bases: Brønsted-Lowry theory, amphiprotic species, $K_a$, $pH$, $pOH$, buffer dynamics, titration curves, indicator selection, conjugate pairs.
+  * Thermochemistry: $\\Delta H$, calorimetry calculation using $c = 4.18\\text{{ J g}}^{{-1}}\\text{{ K}}^{{-1}}$, bond enthalpies.
+  * Organic chemistry & analysis: IUPAC nomenclature, isomerism, functional groups, condensation/addition polymers, IR & NMR spectral interpretation.
+- AUSTRALIAN ATAR COMMAND VERBS: Every short/long answer prompt must be anchored by official NESA/VCAA verbs:
+  * "Explain in terms of...": Link cause and effect at the sub-microscopic/molecular level.
+  * "Justify": Support conclusions by contrasting against an alternative scenario.
+  * "Assess" / "Evaluate": Make evidence-based judgments (e.g. evaluating industrial compromises or experimental validity).
+  * "Deduce": Derive an identity or trend from qualitative or quantitative data tables.
+- WORKING SCIENTIFICALLY (EXPERIMENTAL RIGOR): At least 40% of short/long questions must involve laboratory investigations (titration error analysis, glassware rinsing procedures [water vs. titrant], spirit burner heat loss, outlier identification across repeated trials).
+- AUSTRALIAN REFERENCE BLUEPRINT: Model after authentic NSW HSC Chemistry and Victorian VCE Chemistry Section I and Section II past examination papers."""
 
-    system_prompt = f"""You are an expert academic examiner designing a rigorous assessment paper.
+    return f"""You are a Chief Examination Item Writer and Senior Curriculum Assessor for the Australian Secondary School System.
 
-CRITICAL TYPOGRAPHY & LATEX RULES:
-1. Wrap all inline chemical formulas, charges, thermodynamic quantities, units, and variables in single dollar signs:
-   * Examples: `$H_2SO_4$`, `$\\text{{Fe}}^{{3+}}$`, `$\\Delta G^\\circ = -131\\text{{ kJ mol}}^{{-1}}$`, `$450^\\circ\\text{{C}}$`, `$K_c$`.
-2. Wrap all standalone chemical equations, multi-step reactions, and mathematical proofs in double dollar signs:
-   $$\\text{{CaCO}}_3(s) + 2\\text{{HCl}}(aq) \\rightarrow \\text{{CaCl}}_2(aq) + \\text{{H}}_2\\text{{O}}(l) + \\text{{CO}}_2(g)$$
-3. Strict delimiter rules for formulas:
-   * Keep '$' tightly wrapped around chemical symbols and formulas ONLY.
-   * Put parentheses OUTSIDE the '$' delimiters: write '($SO_3$)', NEVER '($SO_3)' or '$ (SO_3) $'.
-   * NEVER include English words, prepositions, or surrounding prose inside '$' signs (e.g. NEVER write '$SO_3 gas is absorbed$').
-   * EVERY opening '$' MUST have an immediate matching closing '$' on the exact same formula.
-4. Always use standard LaTeX arrows: `\\rightarrow`, `\\rightleftharpoons`, `\\Rightarrow`.
-5. Strictly zero meta-language: never write "based on the reading", "according to the notes", or "from the text".
-6. Do NOT include point values, marks, rubrics, answer keys, or horizontal divider lines.
-7. CRITICAL JSON ESCAPING: In JSON string values, double-escape all LaTeX commands (e.g. `\\\\text{{MJ}}`, `\\\\frac{{25}}{{2}}`, `\\\\Delta`, `\\\\rightarrow`).
+Your objective is to craft an authentic, curriculum-aligned Australian Examination Paper for {year_level} based EXCLUSIVELY on the provided Chapter PDF.
 
-OUTPUT STRICT VALID JSON conforming to:
+================================================================================
+1. STRICT CONTENT BOUNDARY & TOPIC ISOLATION (ZERO LEAKAGE)
+================================================================================
+- [DOCUMENT 1: CHAPTER PDF] defines the absolute syllabus boundary. Every question, scenario, substance, and calculation MUST originate 100% from this text.
+- If a Past Examination Paper (PYQ) is provided [DOCUMENT 2], it serves SOLELY as an ARCHETYPE and PHRASING BLUEPRINT.
+- NEVER copy past paper questions verbatim. Clone the inquiry structure, multi-part style, and question framing, but populate them exclusively with the concepts and data from Document 1.
+- NEVER import unrelated topics from Document 2. If Document 2 contains topics outside Document 1 (e.g., organic synthesis when Document 1 covers particle theory), discard those topics completely.
+
+================================================================================
+2. PEDAGOGICAL & AUSTRALIAN CURRICULUM STANDARDS FOR {year_level.upper()}
+================================================================================
+{curriculum_context}
+
+================================================================================
+3. STRICT NEGATIVE CONSTRAINTS (FORMATTING & MARKS)
+================================================================================
+- DO NOT INCLUDE MARKS OR POINTS: Never write "[2 marks]", "(3 marks)", or total mark counts anywhere in the document.
+- DO NOT GENERATE RESPONSE LINES OR WRITING SPACES: This is a pure question paper. Do not insert dotted lines, blank answer boxes, or empty response prompts.
+- DO NOT INCLUDE ANSWER KEYS, RUBRICS, OR METADATA: Output only the questions and choices.
+- ZERO META-LANGUAGE: Never write "refer to the text", "based on the chapter", or "according to the notes provided".
+
+================================================================================
+4. BULLETPROOF TYPOGRAPHY & LATEX DELIMITERS
+================================================================================
+- Wrap all inline formulas, units, variables, and values tightly in single dollar signs:
+  * Correct: $H_2SO_4$, $\\text{{Fe}}^{{3+}}$, $\\Delta H = -92.2\\text{{ kJ mol}}^{{-1}}$, $K_a = 1.8 \\times 10^{{-5}}$, $25.00\\text{{ mL}}$, $4.18\\text{{ J g}}^{{-1}}\\text{{ K}}^{{-1}}$.
+- Wrap all standalone equations and reactions in double dollar signs:
+  $$\\text{{CaCO}}_3(s) + 2\\text{{HCl}}(aq) \\rightarrow \\text{{CaCl}}_2(aq) + \\text{{H}}_2\\text{{O}}(l) + \\text{{CO}}_2(g)$$
+- Delimiter syntax rules:
+  * Keep dollar signs tightly wrapped around the formula only: write '($SO_3$)', NEVER '($SO_3)' or '$ (SO_3) $'.
+  * NEVER include English prose inside math mode: NEVER write '$SO_3 gas is absorbed$'.
+  * Double-escape all LaTeX backslashes inside JSON strings (e.g. `\\\\text{{}}`, `\\\\Delta`, `\\\\rightarrow`).
+
+================================================================================
+5. REQUIRED JSON SCHEMA
+================================================================================
+Output STRICT, raw, parsable JSON matching this exact structure:
 {{
   "multiple_choice_questions": [
     {{
       "number": 1,
-      "stem": "Stem with equations in $...$ or $$...$$",
-      "options": {{ "A": "Text", "B": "Text", "C": "Text", "D": "Text" }}
+      "stem": "Context-rich question stem with chemical species in $...$",
+      "options": {{
+        "A": "Plausible option or calculation trap",
+        "B": "Plausible option or calculation trap",
+        "C": "Plausible option or calculation trap",
+        "D": "Plausible option or calculation trap"
+      }}
     }}
   ],
   "short_answer_questions": [
     {{
       "number": 1,
-      "stem": "Question stem",
-      "sub_parts": [ "a) Text", "b) Text" ]
+      "stem": "Experimental stimulus or chemical context scenario",
+      "sub_parts": [
+        "a) Scaffolded prompt aligned to {year_level} inquiry expectations (no marks)",
+        "b) Follow-up analytical or explanation prompt (no marks)"
+      ]
     }}
   ],
   "long_answer_questions": [
     {{
       "number": 1,
-      "stem": "Problem stem",
-      "sub_parts": [ "a) Requirement 1", "b) Requirement 2", "c) Requirement 3" ]
+      "stem": "Comprehensive investigation, data interpretation, or multi-step analysis",
+      "sub_parts": [
+        "a) Initial determination, identification, or quantitative step",
+        "b) Mechanistic, molecular, or experimental justification",
+        "c) Critical evaluation of variables, validity, error source, or compromise"
+      ]
     }}
   ]
 }}
 
-EXACT QUANTITY REQUIRED:
-- multiple_choice_questions: EXACTLY {req_mcq} questions. (If 0, return []).
-- short_answer_questions: EXACTLY {req_saq} questions. (If 0, return []).
-- long_answer_questions: EXACTLY {req_laq} questions. (If 0, return [])."""
+EXACT COUNTS TO GENERATE:
+- multiple_choice_questions: EXACTLY {req_mcq} questions. (Empty array [] if 0).
+- short_answer_questions: EXACTLY {req_saq} questions. (Empty array [] if 0).
+- long_answer_questions: EXACTLY {req_laq} questions. (Empty array [] if 0).
+"""
+
+
+def generate_and_verify_homework(chapter_pdf_path: str, pyq_pdf_path: str | None, api_key: str, year_level: str, difficulty: str, custom_keywords: str, req_mcq: int, req_saq: int, req_laq: int) -> dict:
+    client = genai.Client(api_key=api_key)
+    
+    # Upload Chapter PDF (Mandatory)
+    uploaded_chapter = client.files.upload(file=chapter_pdf_path)
+    
+    # Upload PYQ PDF (Optional)
+    uploaded_pyq = None
+    if pyq_pdf_path and os.path.exists(pyq_pdf_path):
+        uploaded_pyq = client.files.upload(file=pyq_pdf_path)
+
+    system_prompt = construct_australian_system_prompt(year_level, req_mcq, req_saq, req_laq)
+
+    # 1. Map Cognitive Difficulty Profile
+    if difficulty == "Easy":
+        difficulty_instruction = (
+            f"DIFFICULTY LEVEL: EASY ({year_level} Foundational):\n"
+            "- Emphasize core definitions applied to familiar scenarios, direct observations, single-step questions, and straightforward relationships.\n"
+            "- Distractors in MCQs should be distinct, avoiding complex multi-layer traps."
+        )
+    elif difficulty == "Medium":
+        difficulty_instruction = (
+            f"DIFFICULTY LEVEL: MEDIUM ({year_level} Standard Australian Curriculum Benchmark):\n"
+            "- Balanced distribution: 30% foundational, 50% application & variable analysis, 20% evaluation.\n"
+            "- Requires clear cause-and-effect reasoning and standard experimental inquiry interpretation."
+        )
+    else:  # Difficult
+        difficulty_instruction = (
+            f"DIFFICULTY LEVEL: DIFFICULT ({year_level} High-Discrimination / Band 6 / VCE 40+ / Extension):\n"
+            "- 70% high-order thinking: novel experimental scenarios, unexpected data anomalies, identifying subtle systematic errors, multi-step problem solving.\n"
+            "- Distractors in MCQs must target common high-achiever misconceptions and calculation traps."
+        )
+
+    # 2. Inject Optional Focus Keywords
+    keywords_instruction = ""
+    if custom_keywords.strip():
+        keywords_instruction = (
+            f"\nEDUCATOR FOCUS SUBTOPICS / KEYWORDS:\n"
+            f"The educator has specifically requested priority emphasis on: '{custom_keywords.strip()}'.\n"
+            f"Ensure at least 60% of questions directly target or contextualize these specific concepts.\n"
+        )
+
+    # 3. Assemble Conversation Contents
+    user_prompt = f"""Generate the {year_level} assessment paper in strict accordance with the Australian Curriculum framework.
+
+{difficulty_instruction}
+{keywords_instruction}
+
+IMPORTANT INSTRUCTIONS REGARDING ATTACHMENTS:
+- The first attached document is [DOCUMENT 1: CHAPTER PDF]. ALL testable concepts, chemical formulas, and contexts MUST originate from Document 1.
+"""
+    if uploaded_pyq is not None:
+        user_prompt += """- The second attached document is [DOCUMENT 2: PAST PAPER / PYQ]. Use Document 2 as an archetype and structural blueprint for authentic Australian questioning style. Do NOT copy questions verbatim. Do NOT import outside topics from Document 2.
+"""
+    else:
+        user_prompt += f"""- No past paper was uploaded. Reference authentic Australian Curriculum examination blueprints (ICAS, Big Science, NESA HSC, VCE) appropriate for {year_level}.
+"""
+
+    user_prompt += f"""
+Ensure EXACT question counts: {req_mcq} MCQs, {req_saq} Short Answer, and {req_laq} Long Answer questions.
+Do NOT include marks, points, or dotted writing lines. Output valid JSON only."""
 
     try:
         model_errors = {}
         active_models = get_available_models(client)
 
         for model_name in active_models:
-            conversation_contents = [
-                uploaded_file,
-                f"Generate the assessment paper as valid JSON with exactly {req_mcq} MCQs, {req_saq} Short Answer, and {req_laq} Long Answer questions."
-            ]
+            conversation_contents = [uploaded_chapter]
+            if uploaded_pyq is not None:
+                conversation_contents.append(uploaded_pyq)
+            conversation_contents.append(user_prompt)
 
             for _ in range(1, 3):
                 try:
@@ -622,9 +762,14 @@ EXACT QUANTITY REQUIRED:
         raise RuntimeError(f"All model fallbacks failed:\n{error_details}")
     finally:
         try:
-            client.files.delete(name=uploaded_file.name)
+            client.files.delete(name=uploaded_chapter.name)
         except Exception:
             pass
+        if uploaded_pyq is not None:
+            try:
+                client.files.delete(name=uploaded_pyq.name)
+            except Exception:
+                pass
 
 
 def json_to_markdown(data: dict, selected_date: str) -> str:
@@ -911,7 +1056,7 @@ if "assessment_data" not in st.session_state:
     st.session_state["assessment_data"] = None
 
 st.title("✨ iWish Exam Paper Generator ✨")
-st.markdown("Upload chapter notes or a textbook PDF to automatically generate a styled homework assessment.")
+st.markdown("Generate authentic Australian Curriculum & ATAR homework assessments from textbook PDFs.")
 
 # Sidebar Settings
 st.sidebar.header("⚙️ Configuration")
@@ -921,7 +1066,31 @@ if not api_key:
     if not api_key:
         st.sidebar.warning("API Key required to run the generator.")
 
+# Grade / Year Selection (Years 6 to 12)
+year_level = st.sidebar.selectbox(
+    "🎓 Grade / Year Level",
+    options=[
+        "Year 6",
+        "Year 7",
+        "Year 8",
+        "Year 9",
+        "Year 10",
+        "Year 11 (ATAR)",
+        "Year 12 (ATAR)"
+    ],
+    index=5,
+    help="Select the Australian Curriculum or Senior ATAR level."
+)
+
 selected_date = st.sidebar.date_input("Homework Date", value=datetime.date.today()).strftime("%d.%m.%Y")
+
+# Difficulty Level Selector
+difficulty = st.sidebar.select_slider(
+    "📊 Difficulty Level",
+    options=["Easy", "Medium", "Difficult"],
+    value="Medium",
+    help="Adjusts foundational vs. high-order thinking question distribution."
+)
 
 st.sidebar.subheader("Question Breakdown (0 to 10)")
 req_mcq = st.sidebar.slider("Multiple Choice Questions", min_value=0, max_value=10, value=5)
@@ -931,7 +1100,33 @@ req_laq = st.sidebar.slider("Long Answer Questions", min_value=0, max_value=10, 
 if req_mcq + req_saq + req_laq == 0:
     st.sidebar.error("Select at least 1 question to generate.")
 
-uploaded_pdf = st.file_uploader("Upload Chapter PDF Document", type=["pdf"])
+# Optional Subtopic / Keyword Focus Checkbox
+enable_keywords = st.sidebar.checkbox("🎯 Target Specific Subtopics / Keywords", value=False)
+custom_keywords = ""
+if enable_keywords:
+    custom_keywords = st.sidebar.text_area(
+        "Enter keywords or subtopics to prioritize:",
+        placeholder="e.g., Buffer action, Ka calculations, phenolphthalein endpoint, titration errors",
+        help="Gemini will allocate at least 60% of questions to these concepts."
+    )
+
+# Dual PDF Upload Slots
+st.subheader("📁 Document Inputs")
+col_upload1, col_upload2 = st.columns(2)
+
+with col_upload1:
+    uploaded_chapter = st.file_uploader(
+        "📘 Upload Chapter PDF (Mandatory Syllabus Content)",
+        type=["pdf"],
+        help="The questions will strictly cover ONLY concepts in this document."
+    )
+
+with col_upload2:
+    uploaded_pyq = st.file_uploader(
+        "📝 Upload Past Paper / PYQ (Optional Style Blueprint)",
+        type=["pdf"],
+        help="Used purely as a style & question structure archetype. Concepts from other chapters in this file are ignored."
+    )
 
 col_action1, col_action2 = st.columns([3, 1])
 with col_action1:
@@ -949,16 +1144,22 @@ if generate_clicked:
     if req_mcq + req_saq + req_laq == 0:
         st.error("Please select at least one question type.")
         st.stop()
-    if not uploaded_pdf:
-        st.error("Please upload a PDF document before generating.")
+    if not uploaded_chapter:
+        st.error("Please upload the Chapter PDF before generating.")
         st.stop()
 
     with tempfile.TemporaryDirectory() as temp_dir:
-        temp_input_pdf = os.path.join(temp_dir, uploaded_pdf.name)
-        with open(temp_input_pdf, "wb") as f:
-            f.write(uploaded_pdf.getbuffer())
+        temp_chapter_pdf = os.path.join(temp_dir, uploaded_chapter.name)
+        with open(temp_chapter_pdf, "wb") as f:
+            f.write(uploaded_chapter.getbuffer())
 
-        base_stem = Path(uploaded_pdf.name).stem
+        temp_pyq_pdf = None
+        if uploaded_pyq:
+            temp_pyq_pdf = os.path.join(temp_dir, uploaded_pyq.name)
+            with open(temp_pyq_pdf, "wb") as f:
+                f.write(uploaded_pyq.getbuffer())
+
+        base_stem = Path(uploaded_chapter.name).stem
         docx_output_path = os.path.join(temp_dir, f"{base_stem}_Assessment.docx")
         pdf_output_path = os.path.join(temp_dir, f"{base_stem}_Assessment.pdf")
 
@@ -975,8 +1176,18 @@ if generate_clicked:
             progress_bar.progress(25)
             status_box.info(random.choice(TIER_2_MESSAGES))
 
-            # Backend AI Generation with Parity and Runaway Math Validation
-            assessment_json = generate_and_verify_homework(temp_input_pdf, api_key, req_mcq, req_saq, req_laq)
+            # Backend AI Generation with Australian Curriculum & PYQ Adaptation
+            assessment_json = generate_and_verify_homework(
+                chapter_pdf_path=temp_chapter_pdf,
+                pyq_pdf_path=temp_pyq_pdf,
+                api_key=api_key,
+                year_level=year_level,
+                difficulty=difficulty,
+                custom_keywords=custom_keywords,
+                req_mcq=req_mcq,
+                req_saq=req_saq,
+                req_laq=req_laq
+            )
 
             # Tier 3 (40% -> 60%)
             progress_bar.progress(50)
