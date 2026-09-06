@@ -294,7 +294,7 @@ TIER_5_MESSAGES = [
     "Reaction arrows ekdum straight aur aligned set ho chuke hain... ➡️📏",
     "Spacing after Option D ko 12 pt fix kar rahe hain for breathing room... 🌬️📏",
     "Document formatting ka level 100/100 touch kar raha hai... 💯🎨",
-    "Aisa lag raha jaise kisi top institution ka assessment paper print ho raha ho... 🎓🏛️",
+    "Aisa lag raha hai jaise kisi top institution ka assessment paper print ho raha ho... 🎓🏛️",
     "Professional styling in progress: Zero clutter, pure elegance... ✨📄",
     "Sabhi fractions aur superscripts ko microscope se check kiya jaa raha hai... 🔬🔢",
     "Word document ban gaya hai, ab PDF pipeline mein transfer ho raha hai... 🔄📑",
@@ -379,7 +379,7 @@ TIER_6_MESSAGES = [
 ]
 
 # ---------------------------------------------------------
-# CORE BACKEND FUNCTIONS & BULLETPROOF MATH GUARDS
+# CORE BACKEND FUNCTIONS & BULLETPROOF MATH POST-PROCESSOR
 # ---------------------------------------------------------
 def sanitize_raw_json_string(raw_json_str: str) -> str:
     cleaned = raw_json_str.strip()
@@ -405,14 +405,14 @@ def check_text_for_math_errors(text: str) -> tuple[bool, str]:
     if not text:
         return True, "Valid"
 
-    # 1. Parity check
+    # 1. Delimiter parity check
     dollar_count = len(re.findall(r'(?<!\\)\$', text))
     if dollar_count % 2 != 0:
         return False, f"Unbalanced '$' delimiter detected (found {dollar_count} '$' signs). Every '$' must be closed."
 
-    # 2. Check for squished words
+    # 2. Check for squished units
     if re.search(r'\b\d+(?:\.\d+)?\s*(?:molof|mLof|gof)\b', text, re.IGNORECASE):
-        return False, "Fused unit detected (e.g., 'molof' or 'mLof'). Ensure units and words like 'of' are separate plain text."
+        return False, "Fused unit detected (e.g., 'molof' or 'mLof'). Keep units and prepositions outside math mode."
 
     # 3. Check for chemical equation missing an arrow
     has_state_symbols = len(re.findall(r'\((?:s|l|g|aq)\)', text)) >= 2
@@ -488,91 +488,98 @@ def verify_assessment_json(data: dict, req_mcq: int, req_saq: int, req_laq: int)
 
 
 def repair_math_syntax(text: str) -> str:
-    """Bulletproof deterministic post-processor: un-fuses words, fixes enthalpy, inserts missing arrows, and preserves math blocks."""
+    """Bulletproof deterministic post-processor:
+    - Cleans non-breaking spaces and rogue escaped brackets.
+    - Fixes fused words ('mLof', 'molof') without breaking 'standard'.
+    - Restores reaction arrows and wraps all chemical reactions/formulas with underscores into math mode.
+    - Standardizes enthalpy notation and eliminates double caret \\wedge exponents.
+    """
     if not text:
         return ""
 
-    # 1. Global word un-fusing
-    text = re.sub(r'(\d+(?:\.\d+)?)\s*molof\s*([A-Za-z0-9_])', r'\1 mol of \2', text)
-    text = re.sub(r'(\d+(?:\.\d+)?)\s*mLof\s*([A-Za-z0-9_])', r'\1 mL of \2', text)
-    text = re.sub(r'(\d+(?:\.\d+)?)\s*gof\s*([A-Za-z0-9_])', r'\1 g of \2', text)
-    text = re.sub(r'([a-zA-Z0-9_\)\}\]])and(\d+)', r'\1 and \2', text)
-    text = re.sub(r'([a-zA-Z0-9_\)\}\]])and([A-Za-z])', r'\1 and \2', text)
+    # 1. Normalize Unicode spaces and unprintable control characters
+    text = text.replace('\u00a0', ' ').replace('\u202f', ' ').replace('\u200b', '').replace('\ufeff', '')
+    text = text.replace('\r\n', '\n').replace('\r', '\n')
+
+    # 2. Fix escaped parentheses that LLMs output (e.g. Pb\(NO_3\)_2 -> Pb(NO_3)_2)
+    text = re.sub(r'\\([()])', r'\1', text)
+    text = text.replace(r'\(', '(').replace(r'\)', ')')
+
+    # 3. Clean tildes and spaces inside state symbols and math tags
+    text = re.sub(r'\(\s*a\s*~?\s*q\s*\)', '(aq)', text)
+    text = re.sub(r'(\b[A-Za-z0-9_\}]+)\s*\(\s*1\s*\)', r'\1(l)', text)  # H2O(1) -> H2O(l)
+    text = re.sub(r'\$len~', '', text)
+
+    # 4. Fix fused words without splitting legitimate English words (like 'standard')
+    text = re.sub(r'(\d+(?:\.\d+)?)\s*molof\s*([A-Za-z0-9_\$])', r'\1 mol of \2', text)
+    text = re.sub(r'(\d+(?:\.\d+)?)\s*mLof\s*([A-Za-z0-9_\$])', r'\1 mL of \2', text)
+    text = re.sub(r'(\d+(?:\.\d+)?)\s*gof\s*([A-Za-z0-9_\$])', r'\1 g of \2', text)
+    text = re.sub(r'(\d+(?:\.\d+)?)\s*kpaof\s*', r'\1 kPa of ', text, flags=re.IGNORECASE)
+    text = re.sub(r'(\d+(?:\.\d+)?)\s*Lof\s*', r'\1 L of ', text)
     text = re.sub(r'\bmixed with(\d+)', r'mixed with \1', text)
     text = re.sub(r'\bwith(\d+)', r'with \1', text)
     text = re.sub(r'\)is\b', r') is ', text)
     text = re.sub(r'([a-zA-Z0-9\)])is mixed with', r'\1 is mixed with', text)
-    text = re.sub(r'\$len~', r'', text)
+    # Safe 'and' un-fusing: only after a closing bracket/digit and before a digit or capitalized chemical formula
+    text = re.sub(r'(\([a-z]+\)|\d|\}|\])\s*and\s*(\d|\$|[A-Z][a-z]?)', r'\1 and \2', text)
 
-    # 2. Fix malformed enthalpy notations (e.g., 'with H = -197^{-1}')
+    # 5. Fix duplicate numbers like 'Step 1 $1:CH_4' -> 'Step 1: $CH_4'
+    text = re.sub(r'(Step\s*\d+)\s*\$\d+\s*:\s*', r'\1: $', text)
+
+    # 6. Standardize enthalpy notations and remove wedge exponents (\wedge\{-1\})
+    text = re.sub(r'\^?\{\s*-?1\s*\}\s*\\wedge\s*\{\s*-?1\s*\}', '^{-1}', text)
     text = re.sub(
-        r'\b(?:with\s+)?(?:\\?Delta\s*)?H\s*=\s*(-?\d+(?:\.\d+)?)\s*(?:\^?\{?-?1\}?|kJ\s*mol\^?\{?-?1\}?|kJ\/mol)?\b',
-        r'with $\\Delta H = \1\\text{ kJ mol}^{-1}$',
+        r'(\$?)\s*(?:with\s+)?(?:\\?Delta\s*)?H\s*=\s*(-?\d+(?:\.\d+)?)\s*(?:kJ\s*(?:~|\\?\s)*mol\^?\{?-?1\}?|\^?\{?-?1\}?|kJ\/mol|kJ\s*mol\^\{-1\}\\wedge\{-1\})?\s*(\$?)',
+        r' $\\Delta H = \2\\text{ kJ mol}^{-1}$ ',
         text
     )
 
-    # 3. Detect and fix missing reaction arrows in chemical reactions
+    # 7. Insert missing reaction arrows in un-arrowed chemical equations
     text = re.sub(
-        r'(\((?:s|l|g|aq)\))\s+(?!(?:and|or|with|react|is|to|in|at|which|by|produce|from|determine)\b)(\d*[A-Z][a-zA-Z0-9_\(\)]*\(?[a-z]*\)?(?:\s*[\+]|\s*\((?:s|l|g|aq)\)))',
+        r'(\((?:s|l|g|aq)\))\s+(?!(?:and|or|with|react|is|to|in|at|which|by|produce|from|determine|where|when)\b)(\d*[A-Z][a-zA-Z0-9_\(\)]*\(?[a-z]*\)?(?:\s*[\+]|\s*\((?:s|l|g|aq)\)))',
         r'\1 \\rightarrow \2',
         text
     )
 
-    # 4. Protect double-dollar blocks ($$ ... $$) so they are never touched
-    display_blocks = []
-    def stash_display(m):
-        display_blocks.append(m.group(0))
-        return f"___DISPLAYBLOCK_{len(display_blocks)-1}___"
-    text = re.sub(r'\$\$[^\$]+\$\$', stash_display, text)
+    # 8. Ensure all chemical formulas and reactions with underscores are wrapped in math mode ($...$)
+    # This prevents Pandoc from interpreting unescaped underscores as Markdown italics and eating symbols!
+    parts = text.split('$')
+    for i in range(0, len(parts), 2):  # Even indices are OUTSIDE math mode
+        chunk = parts[i]
+        if not chunk:
+            continue
 
-    # 5. Safe inline math processing: NEVER strip blocks containing arrows or math operators
-    def clean_inline(m):
-        content = m.group(1).strip()
-        # If it has chemistry arrows or standard math operators, KEEP IN MATH MODE
-        if any(sym in content for sym in [r'\rightarrow', r'\rightleftharpoons', r'\Delta', r'\times', r'\frac', '=', '→', '⇌']):
-            return f"${content}$"
+        # A) Full chemical reactions: contains arrow or (+) with state symbols
+        def wrap_reaction(m):
+            rxn = m.group(0).strip()
+            return f" ${rxn}$ "
 
-        # Check for plain English prose mistakenly trapped in math
-        stopwords = r'\b(is|are|was|were|in|into|absorbed|with|from|than|to|of|the|and|reacting|directly|rather|take|place|vessel|which|calculate|determine|explain|identify|predict|describe|mixed)\b'
-        words_found = re.findall(stopwords, content, re.IGNORECASE)
+        chunk = re.sub(
+            r'((?:\d*[A-Z][a-zA-Z0-9_\(\)]*(?:\([s|l|g|aq]+\))?\s*[\+]\s*)+\d*[A-Z][a-zA-Z0-9_\(\)]*(?:\([s|l|g|aq]+\))?\s*(?:\\rightarrow|\\rightleftharpoons|→|⇌)\s*(?:\d*[A-Z][a-zA-Z0-9_\(\)]*(?:\([s|l|g|aq]+\))?\s*[\+]?\s*)+)',
+            wrap_reaction,
+            chunk
+        )
 
-        # Un-nest plain text prepositions from inside math
-        if words_found or content.count(' ') >= 3:
-            unwound = content
-            unwound = re.sub(r'\b(is mixed with|mixed with|is|of|and|with)\b', r'$ \1 $', unwound)
-            return unwound
+        # B) Standalone formulas with underscores (e.g. N_2, SO_3, Pb(NO_3)_2, CaCO_3)
+        chunk = re.sub(
+            r'(?<![a-zA-Z0-9_])([A-Z][a-zA-Z0-9\(\)]*(?:_[0-9a-zA-Z\{\}]+)+(?:\([s|l|g|aq]+\))?)(?![a-zA-Z0-9_])',
+            r'$\1$',
+            chunk
+        )
 
-        return f"${content}$"
+        parts[i] = chunk
 
-    text = re.sub(r'(?<!\\)\$([^\$]+)\$', clean_inline, text)
+    text = '$'.join(parts)
 
-    # Clean up any empty or duplicated $$ created by unwinding
-    text = re.sub(r'\$\s*\$', ' ', text)
+    # 9. Clean up empty math delimiters
+    text = re.sub(r'\$\s*\$', '', text)
 
-    # Restore display blocks
-    for i, block in enumerate(display_blocks):
-        text = text.replace(f"___DISPLAYBLOCK_{i}___", block)
-
-    # 6. Ensure standalone reactions have proper math formatting for Pandoc
-    def ensure_equation_math(line):
-        if any(sym in line for sym in [r'\rightarrow', r'\rightleftharpoons', '→', '⇌']):
-            if not line.strip().startswith('$') and not line.strip().endswith('$'):
-                # Wrap bare reaction in math delimiters if not already inside
-                line = re.sub(
-                    r'((?:\d*[A-Z][a-zA-Z0-9_\(\)]*(?:\([s|l|g|aq]+\))?\s*[\+]\s*)+\d*[A-Z][a-zA-Z0-9_\(\)]*(?:\([s|l|g|aq]+\))?\s*(?:\\rightarrow|\\rightleftharpoons|→|⇌)\s*(?:\d*[A-Z][a-zA-Z0-9_\(\)]*(?:\([s|l|g|aq]+\))?\s*[\+]?\s*)+)',
-                    r'$\1$',
-                    line
-                )
-        return line
-
-    text = "\n".join([ensure_equation_math(line) for line in text.splitlines()])
-
-    # 7. Parity check: if an unclosed $ remains, close it
+    # 10. Delimiter parity check
     dollar_count = len(re.findall(r'(?<!\\)\$', text))
     if dollar_count % 2 != 0:
         text = text + "$"
 
-    return text
+    return text.strip()
 
 
 def get_available_models(client: genai.Client) -> list[str]:
@@ -868,7 +875,10 @@ def json_to_markdown(data: dict, selected_date: str) -> str:
             md_lines.append(f"**{num}.** {stem}\n")
             opts = q.get("options", {})
             for opt_key in ["A", "B", "C", "D"]:
-                opt_val = repair_math_syntax(str(opts.get(opt_key, "")).strip())
+                opt_val = str(opts.get(opt_key, "")).strip()
+                # Strip redundant leading option letter from the AI string (e.g. "D) " or "D ")
+                opt_val = re.sub(rf'^{opt_key}[\)\.\:\-\s]+\s*', '', opt_val, flags=re.IGNORECASE)
+                opt_val = repair_math_syntax(opt_val)
                 md_lines.append(f"**{opt_key})** {opt_val}\n")
             md_lines.append("")
 
